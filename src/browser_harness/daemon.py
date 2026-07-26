@@ -325,6 +325,15 @@ def is_inspect_tab(t):
     return t["type"] == "page" and t.get("url", "").startswith("chrome://inspect")
 
 
+def harness_opened_inspect():
+    """True when admin's recovery flow opened a chrome://inspect tab that is
+    still awaiting cleanup (the marker survives until the next connect)."""
+    try:
+        return paths.inspect_marker().exists()
+    except OSError:
+        return False
+
+
 def is_reusable_new_tab_page(t):
     """The browser's own New Tab Page, ex: from a fresh launch"""
     return t["type"] == "page" and t.get("url", "").startswith(
@@ -367,9 +376,9 @@ class Daemon:
             # starts with just the New Tab Page. Reuse it — creating about:blank
             pages = [t for t in targets if is_reusable_new_tab_page(t)]
         take_over = None
-        if not pages:
+        if not pages and harness_opened_inspect():
             # After perms granted, only tab is often chrome://inspect
-            # Attach to it instead of creaing new about:blank
+            # Attach to it instead of creating a new about:blank
             inspect_tabs = [t for t in targets if is_inspect_tab(t)]
             if inspect_tabs:
                 pages = [inspect_tabs[0]]
@@ -397,6 +406,8 @@ class Daemon:
 
     async def _close_inspect_tabs(self, targets):
         """Close chrome://inspect tabs left open by the permission recovery flow"""
+        if not harness_opened_inspect():
+            return
         for t in targets:
             if t["targetId"] != self.target_id and is_inspect_tab(t):
                 try:
@@ -404,6 +415,10 @@ class Daemon:
                     log(f"closed leftover chrome://inspect tab {t['targetId']}")
                 except Exception as e:
                     log(f"close inspect tab {t['targetId']}: {e}")
+        try:
+            paths.inspect_marker().unlink()
+        except OSError:
+            pass
 
     async def _enable_default_domains(self, session_id):
         """Enable Page/DOM/Runtime/Network on a CDP session.

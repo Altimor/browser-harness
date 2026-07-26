@@ -860,11 +860,16 @@ def _launch_browser():
     for key in ("BH_CHROME_PATH", "CHROME_PATH"):
         raw = (os.environ.get(key) or "").strip()
         if raw and Path(raw).expanduser().is_file():
-            subprocess.Popen(
-                [str(Path(raw).expanduser())],
-                stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, **ipc.spawn_kwargs(),
-            )
-            return True
+            try:
+                subprocess.Popen(
+                    [str(Path(raw).expanduser())],
+                    stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, **ipc.spawn_kwargs(),
+                )
+                return True
+            except (OSError, subprocess.SubprocessError):
+                # A path that exists but can't execute (permissions, wrong arch)
+                # must fall through to normal discovery, not abort
+                continue
 
     enabled = remote_debugging_toggle_profiles()
     base = enabled[0] if enabled else next((b for b in PROFILES if (b / "Local State").exists()), None)
@@ -899,18 +904,19 @@ def _open_chrome_inspect():
     url = "chrome://inspect/#remote-debugging"
     if platform.system() == "Darwin":
         try:
-            subprocess.run([
+            r = subprocess.run([
                 "osascript",
                 "-e", 'tell application "Google Chrome" to activate',
                 "-e", f'tell application "Google Chrome" to open location "{url}"',
-            ], timeout=5, check=False)
-            return
+            ], timeout=5, check=False, capture_output=True)
+            if r.returncode == 0:
+                return True
         except Exception:
             pass
     try:
-        webbrowser.open(url, new=2)
+        return bool(webbrowser.open(url, new=2))
     except Exception:
-        pass
+        return False
 
 
 INSPECT_REOPEN_TTL = 180.0  # seconds open new chrome://inspect tab
@@ -918,13 +924,14 @@ INSPECT_REOPEN_TTL = 180.0  # seconds open new chrome://inspect tab
 
 def _open_chrome_inspect_once():
     """Open chrome://inspect at most once per INSPECT_REOPEN_TTL across invocations"""
-    marker = paths.config_dir() / "inspect-opened"
+    marker = paths.inspect_marker()
     try:
         if time.time() - marker.stat().st_mtime < INSPECT_REOPEN_TTL:
             return
     except OSError:
         pass
-    _open_chrome_inspect()
+    if not _open_chrome_inspect():
+        return
     try:
         marker.parent.mkdir(parents=True, exist_ok=True)
         marker.touch()
