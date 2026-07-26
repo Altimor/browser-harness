@@ -36,7 +36,9 @@ If the daemon cannot connect, run diagnostics:
 browser-harness --doctor
 ```
 
-If Chrome remote debugging is not enabled, the harness opens:
+If Chrome is not running at all, the harness launches it automatically and retries — no user action needed beyond clicking Allow if a permission popup appears.
+
+If Chrome is running but remote debugging is not enabled, the harness opens:
 
 ```text
 chrome://inspect/#remote-debugging
