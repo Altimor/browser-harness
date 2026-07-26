@@ -90,6 +90,9 @@ REMOTE_ID = os.environ.get("BU_BROWSER_ID")
 BROWSER_KIND = "cloud" if REMOTE_ID else ("cdp" if (os.environ.get("BU_CDP_WS") or os.environ.get("BU_CDP_URL")) else "local")
 # Chrome 144+ shows a per-connection popup. Keep popup open enough to click.
 LOCAL_HANDSHAKE_TIMEOUT = 45
+# How long get_ws_url() keeps waiting for DevToolsActivePort before giving up
+NO_TOGGLE_GRACE = 3
+TOGGLE_BOOT_GRACE = 12
 
 
 def _devtools_port_live(base):
@@ -126,6 +129,51 @@ def remote_debugging_user_enabled():
         if enabled is False:
             seen = False
     return seen
+
+
+def remote_debugging_toggle_profiles():
+    """Profile dirs whose chrome://inspect toggle is recorded on in Local State"""
+    out = []
+    for base in PROFILES:
+        try:
+            state = json.loads((base / "Local State").read_text(encoding="utf-8", errors="replace"))
+            if ((state.get("devtools") or {}).get("remote_debugging") or {}).get("user-enabled") is True:
+                out.append(base)
+        except (OSError, ValueError, AttributeError):
+            continue
+    return out
+
+
+def browser_running_for_profile(base):
+    """True when a running browser instance holds this user-data-dir (POSIX)"""
+    try:
+        target = os.readlink(str(base / "SingletonLock"))
+    except OSError:
+        return False
+    try:
+        pid = int(target.rsplit("-", 1)[-1])
+    except ValueError:
+        return False
+    try:
+        os.kill(pid, 0)
+        return True
+    except ProcessLookupError:
+        return False
+    except OSError:
+        return True  # pid exists but belongs to another user
+
+
+def supported_browser_running():
+    """Is any browser whose profile we scan actually running?"""
+    if platform.system() == "Windows":
+        # Chromium on Windows uses a named mutex instead of SingletonLock —
+        import subprocess
+        try:
+            out = subprocess.check_output(["tasklist"], text=True, errors="replace", timeout=5).lower()
+        except Exception:
+            return True  # can't tell — assume running so recovery stays on the popup/toggle path
+        return any(n in out for n in ("chrome.exe", "msedge.exe", "chromium.exe", "brave.exe", "helium.exe"))
+    return any(browser_running_for_profile(base) for base in PROFILES)
 
 
 def log(msg):
@@ -188,6 +236,7 @@ def get_ws_url():
             hint += "; on Windows also check that a firewall/antivirus isn't blocking localhost connections"
         raise RuntimeError(f"BU_CDP_URL={url} unreachable after 30s: {last_err} -- {hint}")
     deadline = time.time() + 30
+    next_liveness_check = 0.0
     while time.time() < deadline:
         for base in PROFILES:
             try:
@@ -213,6 +262,18 @@ def get_ws_url():
                     return f"ws://127.0.0.1:{port}{ws_path}"
             except (OSError, KeyError, ValueError):
                 pass
+        # Closed browser leaves stale DevToolsActivePort files
+        now = time.time()
+        if now >= next_liveness_check:
+            if not supported_browser_running():
+                raise RuntimeError(
+                    "chrome-not-running: no supported Chromium-family browser is running -- start Chrome, then retry"
+                )
+            next_liveness_check = now + 2
+        # The browser is running but the port isn't up; waiting 30s
+        grace = TOGGLE_BOOT_GRACE if remote_debugging_toggle_profiles() else NO_TOGGLE_GRACE
+        if now > deadline - 30 + grace:
+            break
         time.sleep(0.2)
     for probe_port in (9222, 9223):
         try:
@@ -249,6 +310,37 @@ def is_real_page(t):
     return t["type"] == "page" and not t.get("url", "").startswith(INTERNAL)
 
 
+def is_reusable_blank_page(t):
+    """A plain about:blank tab that is safe to attach to and navigate"""
+    url = t.get("url", "")
+    return (
+        t["type"] == "page"
+        and (url == "about:blank" or url.startswith("about:blank#"))
+        and not t.get("title", "").startswith("Starting agent ")
+    )
+
+
+def is_inspect_tab(t):
+    """A chrome://inspect tab — normally the one the permission flow opened"""
+    return t["type"] == "page" and t.get("url", "").startswith("chrome://inspect")
+
+
+def harness_opened_inspect():
+    """True when admin's recovery flow opened a chrome://inspect tab that is
+    still awaiting cleanup (the marker survives until the next connect)."""
+    try:
+        return paths.inspect_marker().exists()
+    except OSError:
+        return False
+
+
+def is_reusable_new_tab_page(t):
+    """The browser's own New Tab Page, ex: from a fresh launch"""
+    return t["type"] == "page" and t.get("url", "").startswith(
+        ("chrome://newtab", "chrome://new-tab-page", "edge://newtab", "about:newtab")
+    )
+
+
 class _PatientCDPClient(CDPClient):
     """CDPClient with the WS opening handshake stretched to LOCAL_HANDSHAKE_TIMEOUT."""
 
@@ -277,7 +369,22 @@ class Daemon:
         targets = (await self.cdp.send_raw("Target.getTargets"))["targetInfos"]
         pages = [t for t in targets if is_real_page(t)]
         if not pages:
-            # No real pages - create one instead of attaching to omnibox popup.
+            # Fresh browser (ex: BU cloud) starts w about:blank; reuse it
+            pages = [t for t in targets if is_reusable_blank_page(t)]
+        if not pages:
+            # Freshly launched browser (ex: harness relaunching closed Chrome)
+            # starts with just the New Tab Page. Reuse it — creating about:blank
+            pages = [t for t in targets if is_reusable_new_tab_page(t)]
+        take_over = None
+        if not pages and harness_opened_inspect():
+            # After perms granted, only tab is often chrome://inspect
+            # Attach to it instead of creating a new about:blank
+            inspect_tabs = [t for t in targets if is_inspect_tab(t)]
+            if inspect_tabs:
+                pages = [inspect_tabs[0]]
+                take_over = inspect_tabs[0]["targetId"]
+        if not pages:
+            # No usable pages - create one instead of attaching to omnibox popup.
             tid = (await self.cdp.send_raw("Target.createTarget", {"url": "about:blank"}))["targetId"]
             log(f"no real pages found, created about:blank ({tid})")
             pages = [{"targetId": tid, "url": "about:blank", "type": "page"}]
@@ -286,8 +393,32 @@ class Daemon:
         ))["sessionId"]
         self.target_id = pages[0]["targetId"]
         log(f"attached {pages[0]['targetId']} ({pages[0].get('url','')[:80]}) session={self.session}")
+        if take_over:
+            try:
+                await self.cdp.send_raw("Page.navigate", {"url": "about:blank"}, session_id=self.session)
+                log(f"took over inspect tab {take_over} -> about:blank")
+            except Exception as e:
+                log(f"take over inspect tab {take_over}: {e}")
+        if BROWSER_KIND == "local":
+            await self._close_inspect_tabs(targets)
         await self._enable_default_domains(self.session)
         return pages[0]
+
+    async def _close_inspect_tabs(self, targets):
+        """Close chrome://inspect tabs left open by the permission recovery flow"""
+        if not harness_opened_inspect():
+            return
+        for t in targets:
+            if t["targetId"] != self.target_id and is_inspect_tab(t):
+                try:
+                    await self.cdp.send_raw("Target.closeTarget", {"targetId": t["targetId"]})
+                    log(f"closed leftover chrome://inspect tab {t['targetId']}")
+                except Exception as e:
+                    log(f"close inspect tab {t['targetId']}: {e}")
+        try:
+            paths.inspect_marker().unlink()
+        except OSError:
+            pass
 
     async def _enable_default_domains(self, session_id):
         """Enable Page/DOM/Runtime/Network on a CDP session.
