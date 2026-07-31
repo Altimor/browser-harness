@@ -201,6 +201,31 @@ def test_list_tabs_excludes_internal_when_asked():
     assert [t.target_id for t in real] == ["A"]
 
 
+def test_client_reads_responses_larger_than_default_stream_limit(tmp_path, monkeypatch):
+    """A heavy page's AX tree is one multi-MB JSON line -- must not trip asyncio's 64KiB readline limit."""
+    from browser_harness import _ipc
+    from browser_harness.sdk.client import HarnessClient
+
+    sock_path = tmp_path / "bu.sock"
+    monkeypatch.setattr(_ipc, "_sock_path", lambda name: sock_path)
+    big = {"result": {"nodes": ["x" * 1024] * 2048}}  # ~2MB line
+
+    async def scenario():
+        async def handler(reader, writer):
+            await reader.readline()
+            writer.write((json.dumps(big) + "\n").encode())
+            await writer.drain()
+            writer.close()
+
+        server = await asyncio.start_unix_server(handler, path=str(sock_path))
+        async with server:
+            client = HarnessClient("default")
+            return await client.cdp("Accessibility.getFullAXTree")
+
+    result = asyncio.run(scenario())
+    assert len(result["nodes"]) == 2048
+
+
 def test_fill_input_raises_when_element_missing():
     browser, _ = make_browser({"Runtime.evaluate": evaluate_value(False)})
     with pytest.raises(HarnessError, match="element not found"):

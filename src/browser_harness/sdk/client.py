@@ -47,15 +47,19 @@ class HarnessClient:
             raise HarnessError(f"malformed daemon response: {r!r}")
         return r
 
+    # a single AX-tree response can be tens of MB on heavy pages; asyncio's
+    # default 64KiB stream limit would fail readline() on them
+    _STREAM_LIMIT = 256 * 1024 * 1024
+
     async def _request(self, req: dict):
         if not ipc.IS_WINDOWS:
             token = None
-            connector = asyncio.open_unix_connection(str(ipc._sock_path(self.name)))
+            connector = asyncio.open_unix_connection(str(ipc._sock_path(self.name)), limit=self._STREAM_LIMIT)
         else:
             port, token = ipc._read_port_file(self.name)
             if port is None:
                 raise FileNotFoundError(str(ipc.port_path(self.name)))
-            connector = asyncio.open_connection("127.0.0.1", port)
+            connector = asyncio.open_connection("127.0.0.1", port, limit=self._STREAM_LIMIT)
         reader, writer = await asyncio.wait_for(connector, timeout=5.0)
         try:
             if token:
