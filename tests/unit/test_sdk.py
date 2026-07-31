@@ -1,6 +1,7 @@
 """Unit tests for browser_harness.sdk -- daemon replaced by a canned transport."""
 import asyncio
 import json
+from pathlib import Path
 
 import pytest
 
@@ -201,12 +202,15 @@ def test_list_tabs_excludes_internal_when_asked():
     assert [t.target_id for t in real] == ["A"]
 
 
-def test_client_reads_responses_larger_than_default_stream_limit(tmp_path, monkeypatch):
+def test_client_reads_responses_larger_than_default_stream_limit(monkeypatch):
     """A heavy page's AX tree is one multi-MB JSON line -- must not trip asyncio's 64KiB readline limit."""
+    import tempfile
+
     from browser_harness import _ipc
     from browser_harness.sdk.client import HarnessClient
 
-    sock_path = tmp_path / "bu.sock"
+    # not tmp_path -- pytest's dir is too deep for the 104-byte AF_UNIX sun_path limit
+    sock_path = Path(tempfile.mkdtemp(prefix="bhsdk")) / "bu.sock"
     monkeypatch.setattr(_ipc, "_sock_path", lambda name: sock_path)
     big = {"result": {"nodes": ["x" * 1024] * 2048}}  # ~2MB line
 
