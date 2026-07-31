@@ -38,11 +38,30 @@ class HarnessClient:
 
     # --- transport ---
 
-    async def send(self, req: dict) -> dict:
-        """One request/response round-trip; raises HarnessError on daemon errors."""
-        r = await self._request(req)
+    # daemon-reported errors that mean the CDP websocket to the browser died;
+    # ensure_daemon() heals them (probes, restarts, respawns with self.env)
+    _DEAD_TRANSPORT = ("WebSocket connection closed", "no close frame received or sent", "ConnectionClosed")
+
+    async def send(self, req: dict, request_timeout: float | None = None) -> dict:
+        """One request/response round-trip; raises HarnessError on daemon errors.
+        Retries once through ensure_daemon() when the browser websocket died."""
+        try:
+            r = await self._request(req, timeout=request_timeout)
+        except (ConnectionError, FileNotFoundError):
+            await self.ensure_daemon()
+            r = await self._request(req, timeout=request_timeout)
         if isinstance(r, dict) and "error" in r:
-            raise HarnessError(r["error"])
+            error = str(r["error"])
+            if any(marker in error for marker in self._DEAD_TRANSPORT):
+                await asyncio.sleep(2.0)
+                await self.ensure_daemon()
+                r = await self._request(req, timeout=request_timeout)
+                if isinstance(r, dict) and "error" in r:
+                    raise HarnessError(r["error"])
+                if not isinstance(r, dict):
+                    raise HarnessError(f"malformed daemon response: {r!r}")
+                return r
+            raise HarnessError(error)
         if not isinstance(r, dict):
             raise HarnessError(f"malformed daemon response: {r!r}")
         return r
@@ -51,7 +70,7 @@ class HarnessClient:
     # default 64KiB stream limit would fail readline() on them
     _STREAM_LIMIT = 256 * 1024 * 1024
 
-    async def _request(self, req: dict):
+    async def _request(self, req: dict, timeout: float | None = None):
         if not ipc.IS_WINDOWS:
             token = None
             connector = asyncio.open_unix_connection(str(ipc._sock_path(self.name)), limit=self._STREAM_LIMIT)
@@ -66,7 +85,7 @@ class HarnessClient:
                 req = {**req, "token": token}
             writer.write((json.dumps(req) + "\n").encode())
             await writer.drain()
-            data = await asyncio.wait_for(reader.readline(), timeout=self.request_timeout)
+            data = await asyncio.wait_for(reader.readline(), timeout=timeout or self.request_timeout)
             return json.loads(data or b"{}")
         finally:
             writer.close()
@@ -77,9 +96,9 @@ class HarnessClient:
 
     # --- request shapes ---
 
-    async def cdp(self, method: str, session_id: str | None = None, **params):
+    async def cdp(self, method: str, session_id: str | None = None, request_timeout: float | None = None, **params):
         """Raw CDP: `await client.cdp('Page.navigate', url='...')`."""
-        r = await self.send({"method": method, "params": params, "session_id": session_id})
+        r = await self.send({"method": method, "params": params, "session_id": session_id}, request_timeout=request_timeout)
         return r.get("result", {})
 
     async def meta(self, command: str, **fields) -> dict:

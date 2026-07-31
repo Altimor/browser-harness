@@ -143,7 +143,8 @@ def page_info():
     dialog = _send({"meta": "pending_dialog"}).get("dialog")
     if dialog:
         return {"dialog": dialog}
-    expression = "JSON.stringify({url:location.href,title:document.title,w:innerWidth,h:innerHeight,sx:scrollX,sy:scrollY,pw:document.documentElement.scrollWidth,ph:document.documentElement.scrollHeight})"
+    # documentElement is briefly null mid-navigation -- guard, don't crash
+    expression = "(()=>{const d=document.documentElement;return JSON.stringify({url:location.href,title:document.title,w:innerWidth,h:innerHeight,sx:scrollX,sy:scrollY,pw:d?d.scrollWidth:0,ph:d?d.scrollHeight:0})})()"
     return json.loads(_runtime_evaluate(expression))
 
 # --- input ---

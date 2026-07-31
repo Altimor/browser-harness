@@ -17,7 +17,7 @@ class FakeTransport:
         self.handlers = dict(handlers or {})
         self.calls = []
 
-    async def send(self, req):
+    async def send(self, req, request_timeout=None):
         self.calls.append(req)
         key = ("meta", req["meta"]) if "meta" in req else req["method"]
         handler = self.handlers.get(key, {})

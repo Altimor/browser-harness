@@ -131,13 +131,14 @@ class Element:
         """innerText of the element ('' for non-HTMLElement nodes)."""
         return await self._call_on_node("function(){return this.innerText ?? this.textContent ?? '';}") or ""
 
-    async def _call_on_node(self, function_declaration: str):
+    async def _call_on_node(self, function_declaration: str, *args):
         obj = await self._browser.cdp("DOM.resolveNode", backendNodeId=self.backend_node_id)
         object_id = obj["object"]["objectId"]
         r = await self._browser.cdp(
             "Runtime.callFunctionOn",
             objectId=object_id,
             functionDeclaration=function_declaration,
+            arguments=[{"value": a} for a in args],
             returnByValue=True,
         )
         return _runtime_value(r, function_declaration)
@@ -205,10 +206,10 @@ class Browser:
 
     # --- transport ---
 
-    async def cdp(self, method: str, session_id: str | None = None, **params):
+    async def cdp(self, method: str, session_id: str | None = None, request_timeout: float | None = None, **params):
         """Raw CDP escape hatch: `await browser.cdp('Page.navigate', url=...)`."""
         await self._ensure_started()
-        return await self.client.cdp(method, session_id=session_id, **params)
+        return await self.client.cdp(method, session_id=session_id, request_timeout=request_timeout, **params)
 
     async def meta(self, command: str, **fields) -> dict:
         await self._ensure_started()
@@ -229,35 +230,44 @@ class Browser:
         dialog = (await self.meta("pending_dialog")).get("dialog")
         if dialog:
             return PageInfo(dialog=DialogInfo.model_validate(dialog))
+        # documentElement is briefly null mid-navigation -- guard, don't crash the observation
         raw = await self.js(
-            "JSON.stringify({url:location.href,title:document.title,w:innerWidth,h:innerHeight,"
-            "sx:scrollX,sy:scrollY,pw:document.documentElement.scrollWidth,ph:document.documentElement.scrollHeight})"
+            "(()=>{const d=document.documentElement;"
+            "return JSON.stringify({url:location.href,title:document.title,w:innerWidth,h:innerHeight,"
+            "sx:scrollX,sy:scrollY,pw:d?d.scrollWidth:0,ph:d?d.scrollHeight:0})})()"
         )
         return PageInfo.model_validate(json.loads(raw))
 
-    async def js(self, expression: str, target_id: str | None = None, model: type[T] | None = None):
+    async def js(
+        self,
+        expression: str,
+        target_id: str | None = None,
+        model: type[T] | None = None,
+        timeout: float | None = None,
+    ):
         """Evaluate JS in the attached tab (or an iframe target). Retries with a
         function wrapper on illegal top-level `return`; model= validates the
-        result into a pydantic model."""
+        result into a pydantic model; timeout= allows long-running scripts past
+        the default request timeout."""
         sid = None
         if target_id:
             sid = (await self.cdp("Target.attachToTarget", targetId=target_id, flatten=True))["sessionId"]
         try:
-            value = await self._evaluate(expression, session_id=sid)
+            value = await self._evaluate(expression, session_id=sid, timeout=timeout)
         except HarnessError as e:
             if "Illegal return statement" not in str(e):
                 raise
-            value = await self._evaluate(f"(function(){{{expression}}})()", session_id=sid)
+            value = await self._evaluate(f"(function(){{{expression}}})()", session_id=sid, timeout=timeout)
         if model is None:
             return value
         if isinstance(value, str):
             return model.model_validate_json(value)  # type: ignore[attr-defined]
         return model.model_validate(value)  # type: ignore[attr-defined]
 
-    async def _evaluate(self, expression: str, session_id: str | None = None):
+    async def _evaluate(self, expression: str, session_id: str | None = None, timeout: float | None = None):
         try:
             r = await self.cdp(
-                "Runtime.evaluate", session_id=session_id, expression=expression,
+                "Runtime.evaluate", session_id=session_id, request_timeout=timeout, expression=expression,
                 returnByValue=True, awaitPromise=True,
             )
         except (TimeoutError, asyncio.TimeoutError) as e:
