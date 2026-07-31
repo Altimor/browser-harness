@@ -28,6 +28,9 @@ dependencies = [
     "websockets==15.0.1",
 ]
 
+[project.optional-dependencies]
+sdk = ["pydantic>=2.10"]
+
 [project.scripts]
 browser-harness = "browser_harness.run:main"
 
