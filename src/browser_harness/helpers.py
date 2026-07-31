@@ -215,7 +215,7 @@ def fill_input(selector, text, clear_first=True, timeout=0.0):
         mods = _select_all_modifiers()
         select_all = {"key": "a", "code": "KeyA", "modifiers": mods,
                       "windowsVirtualKeyCode": 65, "nativeVirtualKeyCode": 65}
-        cdp("Input.dispatchKeyEvent", type="rawKeyDown", **select_all)
+        cdp("Input.dispatchKeyEvent", type="rawKeyDown", commands=["selectAll"], **select_all)
         cdp("Input.dispatchKeyEvent", type="keyUp", **select_all)
         press_key("Backspace")
     for ch in text:

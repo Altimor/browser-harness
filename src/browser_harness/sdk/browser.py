@@ -15,6 +15,7 @@ from pathlib import Path
 from typing import TypeVar
 
 from .. import _ipc as ipc
+from .. import helpers
 from .client import HarnessClient, HarnessError
 from .views import DialogInfo, PageInfo, Rect, Tab
 
@@ -230,11 +231,13 @@ class Browser:
         dialog = (await self.meta("pending_dialog")).get("dialog")
         if dialog:
             return PageInfo(dialog=DialogInfo.model_validate(dialog))
-        # documentElement is briefly null mid-navigation -- guard, don't crash the observation
-        raw = await self.js(
+        # documentElement is briefly null mid-navigation -- guard, don't crash the observation.
+        # _evaluate, not js(): the CLI's page_info does not await promises here
+        raw = await self._evaluate(
             "(()=>{const d=document.documentElement;"
             "return JSON.stringify({url:location.href,title:document.title,w:innerWidth,h:innerHeight,"
-            "sx:scrollX,sy:scrollY,pw:d?d.scrollWidth:0,ph:d?d.scrollHeight:0})})()"
+            "sx:scrollX,sy:scrollY,pw:d?d.scrollWidth:0,ph:d?d.scrollHeight:0})})()",
+            await_promise=False,
         )
         return PageInfo.model_validate(json.loads(raw))
 
@@ -264,11 +267,17 @@ class Browser:
             return model.model_validate_json(value)  # type: ignore[attr-defined]
         return model.model_validate(value)  # type: ignore[attr-defined]
 
-    async def _evaluate(self, expression: str, session_id: str | None = None, timeout: float | None = None):
+    async def _evaluate(
+        self,
+        expression: str,
+        session_id: str | None = None,
+        timeout: float | None = None,
+        await_promise: bool = True,
+    ):
         try:
             r = await self.cdp(
                 "Runtime.evaluate", session_id=session_id, request_timeout=timeout, expression=expression,
-                returnByValue=True, awaitPromise=True,
+                returnByValue=True, awaitPromise=await_promise,
             )
         except (TimeoutError, asyncio.TimeoutError) as e:
             raise HarnessError(f"Runtime.evaluate timed out; expression: {_js_snippet(expression)}") from e
@@ -295,14 +304,16 @@ class Browser:
         await self.cdp("Input.dispatchKeyEvent", type="keyUp", **base)
 
     async def _select_all(self) -> None:
-        # direct dispatch, not press_key -- its char event turns ctrl/cmd+a into a literal "a".
-        # modifier must match the BROWSER's os, not ours (cloud browsers aren't macs)
+        # commands=["selectAll"] is the keymap-independent path: the bare
+        # ctrl/cmd+a chord silently missed, so the following Backspace deleted
+        # one character and the new text appended to the old value.
+        # direct dispatch, not press_key -- its char event turns the chord into a literal "a".
         if self._select_all_modifiers is None:
             platform = str(await self.js("navigator.platform") or "")
             self._select_all_modifiers = 4 if "Mac" in platform else 2
         select_all = {"key": "a", "code": "KeyA", "modifiers": self._select_all_modifiers,
                       "windowsVirtualKeyCode": 65, "nativeVirtualKeyCode": 65}
-        await self.cdp("Input.dispatchKeyEvent", type="rawKeyDown", **select_all)
+        await self.cdp("Input.dispatchKeyEvent", type="rawKeyDown", commands=["selectAll"], **select_all)
         await self.cdp("Input.dispatchKeyEvent", type="keyUp", **select_all)
 
     async def fill_input(self, selector: str, text: str, clear_first: bool = True, timeout: float = 0.0) -> None:
@@ -370,6 +381,11 @@ class Browser:
     async def _screenshot_b64_raw(self, full: bool) -> str:
         r = await self.cdp("Page.captureScreenshot", format="png", captureBeyondViewport=full)
         return r["data"]
+
+    async def http_get(self, url: str, headers: dict | None = None, timeout: float = 20.0) -> str:
+        """Pure HTTP, no browser -- same helper the CLI exposes. Routes through the
+        fetch-use proxy when BROWSER_USE_API_KEY is set."""
+        return await asyncio.to_thread(helpers.http_get, url, headers, timeout)
 
     async def device_pixel_ratio(self) -> float:
         return float(await self.js("window.devicePixelRatio") or 1)
