@@ -20,13 +20,11 @@ Try browser-harness in [Browser Use Cloud](https://cloud.browser-use.com/v4?utm_
 
 ## See it work
 
-**Task:** "Search this certification portal for creatine, export the first 50 results to CSV, and verify the file."
+**Task:** "Get us two good seats for PAW Patrol at 7 PM near San Francisco. Stop before checkout."
 
-Recorded from a real `browser-harness` CLI run:
+https://github.com/user-attachments/assets/ee5406ee-35d9-4c0c-b397-aef399611934
 
-https://github.com/user-attachments/assets/0d9e0513-312a-474e-9b81-0110c4073edc
-
-[View the full Showcase →](https://browser-use.com/showcase/export-portal-results-to-csv)
+[View the full Showcase →](https://browser-use.com/showcase/pick-adjacent-cinema-seats)
 
 ## Setup prompt
 
