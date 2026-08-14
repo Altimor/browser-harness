@@ -79,6 +79,11 @@ browser-harness <<'PY'
 start_remote_daemon("r7k2")
 PY
 
+# Keep the cloud session fully backgrounded; this prints liveUrl without opening it locally.
+browser-harness <<'PY'
+start_remote_daemon("r7k2", openLiveUrl=False)
+PY
+
 BU_NAME=r7k2 browser-harness <<'PY'
 new_tab("https://example.com")
 print(page_info())
