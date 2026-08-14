@@ -6,7 +6,9 @@ from browser_harness import macos
 
 def test_mac_approve_requires_the_persistent_chrome_checkbox(monkeypatch):
     monkeypatch.setattr(macos.platform, "system", lambda: "Darwin")
-    monkeypatch.setattr(macos, "remote_debugging_toggle_profiles", lambda: [])
+    chrome_root = Path("/tmp/Google Chrome")
+    monkeypatch.setattr(macos, "profile_dirs", lambda system: [chrome_root, Path("/tmp/Edge")])
+    monkeypatch.setattr(macos, "remote_debugging_toggle_profiles", lambda: [Path("/tmp/Edge")])
 
     status, detail = macos.approve_remote_debugging()
 
@@ -16,7 +18,9 @@ def test_mac_approve_requires_the_persistent_chrome_checkbox(monkeypatch):
 
 def test_mac_approve_runs_osascript_only_after_checkbox_is_enabled(monkeypatch):
     monkeypatch.setattr(macos.platform, "system", lambda: "Darwin")
-    monkeypatch.setattr(macos, "remote_debugging_toggle_profiles", lambda: [Path("/tmp/Chrome")])
+    chrome_root = Path("/tmp/Google Chrome")
+    monkeypatch.setattr(macos, "profile_dirs", lambda system: [chrome_root])
+    monkeypatch.setattr(macos, "remote_debugging_toggle_profiles", lambda: [chrome_root])
     calls = []
     monkeypatch.setattr(
         macos.subprocess,
@@ -36,7 +40,9 @@ def test_mac_approve_runs_osascript_only_after_checkbox_is_enabled(monkeypatch):
 
 def test_mac_approve_returns_not_found_without_a_prompt(monkeypatch):
     monkeypatch.setattr(macos.platform, "system", lambda: "Darwin")
-    monkeypatch.setattr(macos, "remote_debugging_toggle_profiles", lambda: [Path("/tmp/Chrome")])
+    chrome_root = Path("/tmp/Google Chrome")
+    monkeypatch.setattr(macos, "profile_dirs", lambda system: [chrome_root])
+    monkeypatch.setattr(macos, "remote_debugging_toggle_profiles", lambda: [chrome_root])
     monkeypatch.setattr(
         macos.subprocess,
         "run",
@@ -44,6 +50,25 @@ def test_mac_approve_returns_not_found_without_a_prompt(monkeypatch):
     )
 
     assert macos.approve_remote_debugging() == ("not-found", None)
+
+
+def test_mac_approve_maps_pending_accessibility_consent_to_guidance(monkeypatch):
+    monkeypatch.setattr(macos.platform, "system", lambda: "Darwin")
+    chrome_root = Path("/tmp/Google Chrome")
+    monkeypatch.setattr(macos, "profile_dirs", lambda system: [chrome_root])
+    monkeypatch.setattr(macos, "remote_debugging_toggle_profiles", lambda: [chrome_root])
+    monkeypatch.setattr(
+        macos.subprocess,
+        "run",
+        lambda *args, **kwargs: (_ for _ in ()).throw(
+            macos.subprocess.TimeoutExpired(["osascript"], 5)
+        ),
+    )
+
+    status, detail = macos.approve_remote_debugging()
+
+    assert status == "accessibility-required"
+    assert "Accessibility" in detail
 
 
 def test_mac_approve_is_unavailable_off_macos(monkeypatch):

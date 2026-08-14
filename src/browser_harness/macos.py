@@ -5,7 +5,7 @@ from __future__ import annotations
 import platform
 import subprocess
 
-from .daemon import remote_debugging_toggle_profiles
+from .daemon import profile_dirs, remote_debugging_toggle_profiles
 
 
 _APPLESCRIPT = r'''using terms from application "System Events"
@@ -50,12 +50,24 @@ return resultText
 '''
 
 
+_ACCESSIBILITY_DETAIL = (
+    "allow the app launching browser-harness (for example Terminal, iTerm, or Codex) "
+    "in System Settings > Privacy & Security > Accessibility"
+)
+
+
+def _google_chrome_toggle_enabled() -> bool:
+    """Only accept the toggle from the Google Chrome root used by the script."""
+    chrome_root = profile_dirs("Darwin")[0]
+    return chrome_root in remote_debugging_toggle_profiles()
+
+
 def approve_remote_debugging() -> tuple[str, str | None]:
     """Click Chrome's exact per-connection Allow sheet without activating Chrome."""
     if platform.system() != "Darwin":
         return "unsupported", "mac-approve is only available on macOS"
 
-    if not remote_debugging_toggle_profiles():
+    if not _google_chrome_toggle_enabled():
         return (
             "setup-required",
             'first enable "Allow remote debugging for this browser instance" at '
@@ -71,6 +83,8 @@ def approve_remote_debugging() -> tuple[str, str | None]:
             timeout=5,
             check=False,
         )
+    except subprocess.TimeoutExpired:
+        return "accessibility-required", _ACCESSIBILITY_DETAIL
     except (OSError, subprocess.SubprocessError) as exc:
         return "error", str(exc)
 
@@ -79,8 +93,7 @@ def approve_remote_debugging() -> tuple[str, str | None]:
         if "not authorized" in detail.lower() or "assistive" in detail.lower():
             return (
                 "accessibility-required",
-                "allow the app launching browser-harness (for example Terminal, iTerm, or Codex) "
-                "in System Settings > Privacy & Security > Accessibility",
+                _ACCESSIBILITY_DETAIL,
             )
         return "error", detail
 
