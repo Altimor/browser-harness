@@ -109,6 +109,18 @@ def test_active_browser_connections_counts_only_healthy_daemons(monkeypatch):
     assert admin.active_browser_connections() == 1
 
 
+def test_daemon_browser_ready_checks_the_selected_daemon(monkeypatch):
+    calls = []
+    monkeypatch.setattr(
+        admin,
+        "_daemon_browser_connection",
+        lambda name: calls.append(name) or {"name": name, "page": None},
+    )
+
+    assert admin.daemon_browser_ready("work")
+    assert calls == ["work"]
+
+
 def test_active_browser_connections_skips_daemons_reporting_cdp_disconnected(monkeypatch):
     monkeypatch.setattr(admin, "_daemon_endpoint_names", lambda: ["default", "stale"])
 

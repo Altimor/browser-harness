@@ -35,7 +35,8 @@ the checkbox so the agent can connect to your browser:
 
 On macOS, run `browser-harness mac-approve` after a `permission-blocked` error
 to handle the per-attach Allow sheet without bringing Chrome to the foreground.
-The helper clicks only Chrome's exact `Allow remote debugging?` sheet.
+The helper clicks only Chrome's exact `Allow remote debugging?` sheet. It returns
+`ready` instead if you already clicked Allow, so the agent knows it can continue.
 
 <img src="docs/allow-remote-debugging.png" alt="Allow remote debugging popup" width="520" style="border-radius: 12px;" />
 

@@ -4,9 +4,10 @@ from __future__ import annotations
 
 import platform
 import subprocess
+from pathlib import Path
 
-from .daemon import profile_dirs, remote_debugging_toggle_profiles
-
+from .admin import daemon_browser_ready
+from .daemon import remote_debugging_toggle_profiles
 
 _APPLESCRIPT = r'''using terms from application "System Events"
     on clickAllow(nodeRef)
@@ -56,16 +57,22 @@ _ACCESSIBILITY_DETAIL = (
 )
 
 
+def _google_chrome_root() -> Path:
+    return Path.home() / "Library/Application Support/Google/Chrome"
+
+
 def _google_chrome_toggle_enabled() -> bool:
     """Only accept the toggle from the Google Chrome root used by the script."""
-    chrome_root = profile_dirs("Darwin")[0]
-    return chrome_root in remote_debugging_toggle_profiles()
+    return _google_chrome_root() in remote_debugging_toggle_profiles()
 
 
 def approve_remote_debugging() -> tuple[str, str | None]:
     """Click Chrome's exact per-connection Allow sheet without activating Chrome."""
     if platform.system() != "Darwin":
         return "unsupported", "mac-approve is only available on macOS"
+
+    if daemon_browser_ready():
+        return "ready", None
 
     if not _google_chrome_toggle_enabled():
         return (
@@ -101,6 +108,11 @@ def approve_remote_debugging() -> tuple[str, str | None]:
     if status == "clicked":
         return "clicked", None
     if status == "not-found":
+        # The user may have accepted the sheet while AppleScript was looking
+        # for it. Distinguish that successful race from a genuinely absent
+        # prompt so agents know they can continue immediately.
+        if daemon_browser_ready():
+            return "ready", None
         return "not-found", None
     return "error", f"unexpected osascript result: {status or '<empty>'}"
 
@@ -115,4 +127,4 @@ def run_cli(args: list[str]) -> int:
         print(f"{status}: {detail}", flush=True)
     else:
         print(status, flush=True)
-    return 0 if status == "clicked" else 1
+    return 0 if status in {"clicked", "ready"} else 1
