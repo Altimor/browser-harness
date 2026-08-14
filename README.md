@@ -28,11 +28,14 @@ Paste into Claude Code or Codex:
 Install or upgrade browser-harness to the latest stable version with uv using Python 3.12, register the skill from `browser-harness skill`, and connect it to my browser. Ask whether I want local browser recordings enabled; default to no and preserve my existing preference on upgrades. Follow https://github.com/browser-use/browser-harness/blob/main/install.md if setup or connection fails.
 ```
 
-The agent will open `chrome://inspect/#remote-debugging`. Tick the checkbox so the agent can connect to your browser:
+The agent will open `chrome://inspect/#remote-debugging`. On first setup, tick
+the checkbox so the agent can connect to your browser:
 
 <img src="docs/setup-remote-debugging.png" alt="Remote debugging setup" width="520" style="border-radius: 12px;" />
 
-Click Allow when the per-attach popup appears (Chrome 144+):
+On macOS, run `browser-harness mac-approve` after a `permission-blocked` error
+to handle the per-attach Allow sheet without bringing Chrome to the foreground.
+The helper clicks only Chrome's exact `Allow remote debugging?` sheet.
 
 <img src="docs/allow-remote-debugging.png" alt="Allow remote debugging popup" width="520" style="border-radius: 12px;" />
 

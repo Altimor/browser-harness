@@ -44,58 +44,17 @@ If Chrome is running but remote debugging is not enabled, the harness opens:
 chrome://inspect/#remote-debugging
 ```
 
-On macOS, treat browser automation as already authorized when the user installs
-and uses the browser agent. Always use Accessibility/System Events for this
-exact prompt because CDP is not available until Chrome approves the connection.
-After a `permission-blocked` error, inspect Chrome's sheets and only click an
-`Allow` button inside a sheet whose exact title is `Allow remote debugging?`:
+On macOS, after a `permission-blocked` error, run the built-in helper:
 
-```bash
-osascript <<'APPLESCRIPT'
-using terms from application "System Events"
-    on clickAllow(nodeRef)
-        try
-            if (role of nodeRef as text) is "AXButton" and ¬
-                (description of nodeRef as text) is "Allow" then
-                perform action "AXPress" of nodeRef
-                return true
-            end if
-        end try
-        try
-            repeat with childRef in UI elements of nodeRef
-                if my clickAllow(childRef) then return true
-            end repeat
-        end try
-        return false
-    end clickAllow
-end using terms from
-
-set resultText to "not-found"
-tell application "System Events"
-    if exists process "Google Chrome" then
-        tell process "Google Chrome"
-            repeat with w in windows
-                try
-                    repeat with s in sheets of w
-                        if (name of s as text) is "Allow remote debugging?" then
-                            if my clickAllow(s) then
-                                set resultText to "clicked"
-                                exit repeat
-                            end if
-                        end if
-                    end repeat
-                end try
-                if resultText is "clicked" then exit repeat
-            end repeat
-        end tell
-    end if
-end tell
-return resultText
-APPLESCRIPT
+```text
+browser-harness mac-approve
 ```
 
-Retry only when the script returns `clicked`. This requires Accessibility
-permission for the terminal/agent host in macOS System Settings.
+Retry only when the command returns `clicked`. If it reports `setup-required`,
+enable "Allow remote debugging for this browser instance" once at
+`chrome://inspect/#remote-debugging`, then run the helper again. The helper
+requires Accessibility permission for the app launching `browser-harness`
+(such as Terminal, iTerm, Codex, or an IDE) in macOS System Settings.
 
 ## Remote Browsers
 
@@ -211,7 +170,7 @@ If you get stuck on a browser mechanic, check https://github.com/browser-use/bro
 ## Gotchas
 
 - `chrome://inspect/#remote-debugging` must be enabled for local Chrome control.
-- On macOS, if Chrome shows an "Allow remote debugging?" popup, run the Accessibility/System Events handler above after `permission-blocked` and retry only when it returns `clicked`. Do not poll in a loop — the daemon's single held connection avoids repeated prompts.
+- On macOS, if Chrome shows an "Allow remote debugging?" popup, run `browser-harness mac-approve` after `permission-blocked` and retry only when it returns `clicked`. Do not poll in a loop — the daemon's single held connection avoids repeated prompts.
 - Omnibox popups are not real work tabs.
 - CDP target order is not Chrome's visible tab-strip order.
 - `BU_CDP_URL` is an HTTP DevTools endpoint; the daemon resolves it to WebSocket.
