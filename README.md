@@ -68,6 +68,13 @@ PY
 
 Normal agent-facing docs should keep using `browser-harness`; the `./browser-harness` launcher is only for local repo testing.
 
+## MCP server
+
+`mcp_server.py` exposes the browser control helpers as MCP tools over stdio,
+so any MCP client (Claude Code, Devin, Cursor, etc.) can drive the browser
+without writing a second CDP layer. See [docs/MCP.md](docs/MCP.md) for setup and
+client configuration.
+
 ## Contributing
 
 PRs and improvements welcome. The best way to help: **contribute a new domain skill** under [agent-workspace/domain-skills/](agent-workspace/domain-skills/) for a site or task you use often (LinkedIn outreach, ordering on Amazon, filing expenses, etc.). Each skill teaches the agent the selectors, flows, and edge cases it would otherwise have to rediscover.
