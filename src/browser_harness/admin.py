@@ -241,6 +241,11 @@ def _daemon_browser_connection(name):
             c.close()
 
 
+def daemon_browser_ready(name=None):
+    """Whether the selected daemon has a healthy attached browser connection."""
+    return _daemon_browser_connection(name or NAME) is not None
+
+
 def browser_connections():
     """Live browser-harness daemons with healthy CDP browser connections and their attached page."""
     out = []
@@ -373,7 +378,15 @@ def ensure_daemon(wait=60.0, name=None, env=None):
             if daemon_alive(name): return
             if p.poll() is not None: break
             if not hinted and time.time() - spawned > 2 and (_log_tail(name) or "").startswith("handshake-wait"):
-                print('browser-harness: Chrome is asking "Allow remote debugging?" — click Allow to continue.', file=sys.stderr)
+                action = (
+                    "run `browser-harness mac-approve` in another shell or click Allow"
+                    if sys.platform == "darwin"
+                    else "click Allow"
+                )
+                print(
+                    f'browser-harness: Chrome is asking "Allow remote debugging?" — {action} to continue.',
+                    file=sys.stderr,
+                )
                 hinted = True
             time.sleep(0.2)
         msg = _log_tail(name) or ""

@@ -49,10 +49,21 @@ In Chrome:
 
 1. Open `chrome://inspect/#remote-debugging`.
 2. Tick "Allow remote debugging for this browser instance".
-3. Click Allow on the popup if it appears.
-4. Retry `page_info()`.
+3. Retry `page_info()`.
 
-The checkbox and popup require the user.
+If that reports `permission-blocked` on macOS, handle the per-connection Allow
+sheet without bringing Chrome to the foreground:
+
+```bash
+browser-harness mac-approve
+```
+
+Continue browser work when the helper returns `ready`; otherwise follow its
+printed instruction. The first checkbox is intentionally a one-time manual
+Chrome setup step; it is not exposed to the harness until CDP is available.
+
+The helper requires Accessibility permission for the app launching the CLI
+(for example Terminal, iTerm, Codex, or an IDE) in System Settings.
 
 ## Cloud Browsers
 
