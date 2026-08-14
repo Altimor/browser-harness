@@ -36,13 +36,13 @@ tell application "System Events"
                     repeat with s in sheets of w
                         if (name of s as text) is "Allow remote debugging?" then
                             if my clickAllow(s) then
-                                set resultText to "clicked"
+                                set resultText to "ready"
                                 exit repeat
                             end if
                         end if
                     end repeat
                 end try
-                if resultText is "clicked" then exit repeat
+                if resultText is "ready" then exit repeat
             end repeat
         end tell
     end if
@@ -105,12 +105,10 @@ def approve_remote_debugging() -> tuple[str, str | None]:
         return "error", detail
 
     status = completed.stdout.strip()
-    if status == "clicked":
-        return "clicked", None
+    if status == "ready":
+        return "ready", None
     if status == "not-found":
-        # The user may have accepted the sheet while AppleScript was looking
-        # for it. Distinguish that successful race from a genuinely absent
-        # prompt so agents know they can continue immediately.
+        # The user may have accepted the sheet while AppleScript was looking.
         if daemon_browser_ready():
             return "ready", None
         return "not-found", None
@@ -127,4 +125,4 @@ def run_cli(args: list[str]) -> int:
         print(f"{status}: {detail}", flush=True)
     else:
         print(status, flush=True)
-    return 0 if status in {"clicked", "ready"} else 1
+    return 0 if status == "ready" else 1

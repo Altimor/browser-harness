@@ -44,23 +44,13 @@ If Chrome is running but remote debugging is not enabled, the harness opens:
 chrome://inspect/#remote-debugging
 ```
 
-On macOS, when stderr says Chrome is asking for remote-debugging permission (or
-after a `permission-blocked` error), run the built-in helper in another shell:
+On macOS, when Chrome asks for remote-debugging permission, run:
 
 ```text
 browser-harness mac-approve
 ```
 
-If it returns `clicked`, retry the browser command. If it returns `ready`, the
-user or another process already accepted the sheet and browser work can continue
-without clicking again. If it reports `setup-required`, enable "Allow remote
-debugging for this browser instance" once at
-`chrome://inspect/#remote-debugging`, then run the helper again. The helper
-requires Accessibility permission for the app launching `browser-harness`
-(such as Terminal, iTerm, Codex, or an IDE) in macOS System Settings. If it
-returns `not-found`, neither the sheet nor a healthy browser connection exists;
-retry the original browser command once and use the helper when the prompt
-message appears.
+Continue browser work when it returns `ready`.
 
 ## Remote Browsers
 
@@ -176,7 +166,7 @@ If you get stuck on a browser mechanic, check https://github.com/browser-use/bro
 ## Gotchas
 
 - `chrome://inspect/#remote-debugging` must be enabled for local Chrome control.
-- On macOS, if Chrome shows an "Allow remote debugging?" popup, run `browser-harness mac-approve` in another shell when the prompt message appears. Retry the browser command after `clicked`; continue normally after `ready`, which means the user or another process already accepted it. Do not poll in a loop — the daemon's single held connection avoids repeated prompts.
+- On macOS, if Chrome shows an "Allow remote debugging?" popup, run `browser-harness mac-approve`. Do not poll in a loop — the daemon holds one connection.
 - Omnibox popups are not real work tabs.
 - CDP target order is not Chrome's visible tab-strip order.
 - `BU_CDP_URL` is an HTTP DevTools endpoint; the daemon resolves it to WebSocket.

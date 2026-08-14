@@ -33,13 +33,6 @@ the checkbox so the agent can connect to your browser:
 
 <img src="docs/setup-remote-debugging.png" alt="Remote debugging setup" width="520" style="border-radius: 12px;" />
 
-On macOS, run `browser-harness mac-approve` after a `permission-blocked` error
-to handle the per-attach Allow sheet without bringing Chrome to the foreground.
-The helper clicks only Chrome's exact `Allow remote debugging?` sheet. It returns
-`ready` instead if you already clicked Allow, so the agent knows it can continue.
-
-<img src="docs/allow-remote-debugging.png" alt="Allow remote debugging popup" width="520" style="border-radius: 12px;" />
-
 See [agent-workspace/domain-skills/](agent-workspace/domain-skills/) for example tasks.
 
 ## Free Browser Use Cloud browsers

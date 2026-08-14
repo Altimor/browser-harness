@@ -39,12 +39,12 @@ def test_mac_approve_runs_osascript_only_after_checkbox_is_enabled(monkeypatch):
         macos.subprocess,
         "run",
         lambda *args, **kwargs: calls.append((args, kwargs))
-        or SimpleNamespace(returncode=0, stdout="clicked\n", stderr=""),
+        or SimpleNamespace(returncode=0, stdout="ready\n", stderr=""),
     )
 
     status, detail = macos.approve_remote_debugging()
 
-    assert (status, detail) == ("clicked", None)
+    assert (status, detail) == ("ready", None)
     assert calls[0][0] == (["osascript"],)
     assert "Allow remote debugging?" in calls[0][1]["input"]
     assert "AXPress" in calls[0][1]["input"]
