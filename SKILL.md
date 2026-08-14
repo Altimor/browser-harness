@@ -211,7 +211,7 @@ If you get stuck on a browser mechanic, check https://github.com/browser-use/bro
 ## Gotchas
 
 - `chrome://inspect/#remote-debugging` must be enabled for local Chrome control.
-- Chrome may show an "Allow remote debugging?" popup; wait for the user to click Allow. Do not retry in a loop — Chrome pops a fresh dialog for every new connection, and the daemon's single held connection is what makes this a one-time click.
+- On macOS, if Chrome shows an "Allow remote debugging?" popup, run the Accessibility/System Events handler above after `permission-blocked` and retry only when it returns `clicked`. Do not poll in a loop — the daemon's single held connection avoids repeated prompts.
 - Omnibox popups are not real work tabs.
 - CDP target order is not Chrome's visible tab-strip order.
 - `BU_CDP_URL` is an HTTP DevTools endpoint; the daemon resolves it to WebSocket.
