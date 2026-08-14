@@ -46,30 +46,47 @@ chrome://inspect/#remote-debugging
 
 Ask the user to tick "Allow remote debugging for this browser instance" and click Allow if Chrome shows a permission popup. Then retry the same `browser-harness` command.
 
-On macOS, when the user has explicitly opted into local automatic approval, an
-agent may use Accessibility/System Events for this exact prompt because CDP is
-not available until Chrome approves the connection. Run this only after a
-`permission-blocked` error, never on every command, and only click an `Allow`
-button in a Chrome window whose UI text contains `remote debugging`:
+On macOS, always use Accessibility/System Events for this exact prompt because
+CDP is not available until Chrome approves the connection. Run this after a
+`permission-blocked` error and inspect Chrome's sheets; only click an `Allow`
+button inside a sheet whose exact title is `Allow remote debugging?`:
 
 ```bash
 osascript <<'APPLESCRIPT'
+using terms from application "System Events"
+    on clickAllow(nodeRef)
+        try
+            if (role of nodeRef as text) is "AXButton" and ¬
+                (description of nodeRef as text) is "Allow" then
+                perform action "AXPress" of nodeRef
+                return true
+            end if
+        end try
+        try
+            repeat with childRef in UI elements of nodeRef
+                if my clickAllow(childRef) then return true
+            end repeat
+        end try
+        return false
+    end clickAllow
+end using terms from
+
 set resultText to "not-found"
 tell application "System Events"
     if exists process "Google Chrome" then
         tell process "Google Chrome"
             repeat with w in windows
                 try
-                    set promptText to (value of every static text of w) as text
-                    if promptText contains "remote debugging" then
-                        set buttons to (every button of w whose name is "Allow")
-                        if (count of buttons) is greater than 0 then
-                            click item 1 of buttons
-                            set resultText to "clicked"
-                            exit repeat
+                    repeat with s in sheets of w
+                        if (name of s as text) is "Allow remote debugging?" then
+                            if my clickAllow(s) then
+                                set resultText to "clicked"
+                                exit repeat
+                            end if
                         end if
-                    end if
+                    end repeat
                 end try
+                if resultText is "clicked" then exit repeat
             end repeat
         end tell
     end if
@@ -79,8 +96,7 @@ APPLESCRIPT
 ```
 
 Retry only when the script returns `clicked`. This requires Accessibility
-permission for the terminal/agent host in macOS System Settings. Do not use a
-generic coordinate click or click unrelated browser permission dialogs.
+permission for the terminal/agent host in macOS System Settings.
 
 ## Remote Browsers
 
