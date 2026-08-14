@@ -14,6 +14,8 @@ import functools
 import json
 import math
 import os
+import sys
+from contextlib import contextmanager
 from datetime import datetime
 from decimal import Decimal
 from pathlib import Path
@@ -52,12 +54,26 @@ from browser_harness.helpers import (
 SERVER = MCPServer("browser-harness")
 
 
-def _json_default(value: Any) -> Any:
-    """Fallback JSON encoder for values that json.dumps cannot serialize."""
+def _normalize(value: Any) -> Any:
+    """Recursively convert values to JSON-safe forms before json.dumps.
+
+    json.dumps with allow_nan=False raises on NaN/Inf *before* calling
+    `default`, so non-finite floats from JS (NaN, Infinity) must be normalized
+    here instead.
+    """
     if isinstance(value, float) and (math.isnan(value) or math.isinf(value)):
         return None
+    if isinstance(value, dict):
+        return {k: _normalize(v) for k, v in value.items()}
+    if isinstance(value, (list, tuple)):
+        return [_normalize(v) for v in value]
     if isinstance(value, (set, frozenset)):
-        return list(value)
+        return [_normalize(v) for v in value]
+    return value
+
+
+def _json_default(value: Any) -> Any:
+    """Fallback JSON encoder for values that json.dumps cannot serialize."""
     if isinstance(value, bytes):
         return value.decode("utf-8", errors="replace")
     if isinstance(value, datetime):
@@ -71,22 +87,47 @@ def _json_default(value: Any) -> Any:
 
 def _dump(value: Any) -> str:
     """Serialize a value to JSON text, never raising for unserializable data."""
-    return json.dumps(value, ensure_ascii=False, allow_nan=False, default=_json_default)
+    return json.dumps(
+        _normalize(value),
+        ensure_ascii=False,
+        allow_nan=False,
+        default=_json_default,
+    )
+
+
+@contextmanager
+def _stderr_stdout():
+    """Redirect stdout to stderr for the duration of the context.
+
+    Some browser-harness helpers (start_recording, stop_recording) print status
+    messages. Under MCP stdio, any stdout output that isn't a valid JSON-RPC
+    message corrupts the protocol. Redirect stdout → stderr so those messages
+    reach the client's logs without breaking the wire format.
+    """
+    saved = sys.stdout
+    sys.stdout = sys.stderr
+    try:
+        yield
+    finally:
+        sys.stdout = saved
 
 
 def _tool(fn):
     """Wrap a helper so it is exposed as an MCP tool and returns JSON text.
 
-    Ensures the daemon is up, runs the helper, catches exceptions, and always
-    returns a JSON string. Tool name and description are taken from the
-    wrapped function so the schema matches the parameter annotations.
+    Ensures the daemon is up, runs the helper, catches exceptions (including
+    daemon startup failures), and always returns a JSON string. Tool name and
+    description are taken from the wrapped function so the schema matches the
+    parameter annotations.
     """
 
     @functools.wraps(fn)
     def wrapper(*args, **kwargs):
-        ensure_daemon()
         try:
-            return _dump(fn(*args, **kwargs))
+            ensure_daemon()
+            with _stderr_stdout():
+                result = fn(*args, **kwargs)
+            return _dump(result)
         except Exception as exc:
             return _dump({"error": str(exc)})
 
@@ -231,9 +272,10 @@ def browser_upload_file(selector: str, path: str):
 
 
 @_tool
-def browser_http_get(url: str, timeout: float = 20.0):
-    """HTTP GET `url` (browser-less). Returns the response body."""
-    return {"text": http_get(url, timeout=timeout)}
+def browser_http_get(url: str, timeout: float = 20.0, headers: dict | None = None):
+    """HTTP GET `url` (browser-less). Returns the response body. Optional
+    `headers` dict for authentication or custom request headers."""
+    return {"text": http_get(url, headers=headers, timeout=timeout)}
 
 
 @_tool

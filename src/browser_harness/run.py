@@ -377,7 +377,12 @@ def _run(args):
             and os.environ.get("BU_AUTOSPAWN")
         ):
             start_remote_daemon(NAME)
-        ensure_daemon()
+        try:
+            ensure_daemon()
+        except RuntimeError as e:
+            # Setup/permission errors are instructions for calling agent
+            print(f"browser-harness: {e}", file=sys.stderr)
+            sys.exit(1)
     _install_helper_trace()
     exec(code, globals())
 

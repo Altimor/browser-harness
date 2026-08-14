@@ -9,7 +9,7 @@ inside `src/browser_harness/`.
 From the repo root:
 
 ```bash
-uv run python -m mcp_server
+uv run --extra mcp python -m mcp_server
 ```
 
 The server speaks MCP stdio and connects to the same local Chrome CDP endpoint
@@ -18,7 +18,8 @@ call.
 
 ## Tools
 
-All helpers from `browser_harness.helpers` are exposed with a `browser_` prefix:
+The browser control helpers from `browser_harness.helpers` are exposed as MCP
+tools with a `browser_` prefix:
 
 - `browser_new_tab`
 - `browser_goto`
@@ -62,14 +63,14 @@ Replace `<path-to-repo>` with your checkout path.
 
 ```bash
 claude mcp add browser-harness \
-  uv --directory <path-to-repo> run python -m mcp_server
+  uv --directory <path-to-repo> run --extra mcp python -m mcp_server
 ```
 
 ### Devin
 
 ```bash
 devin mcp add -s project browser-harness -- \
-  uv --directory <path-to-repo> run python -m mcp_server
+  uv --directory <path-to-repo> run --extra mcp python -m mcp_server
 ```
 
 ### Cursor / OpenClaw / other MCP clients
@@ -83,6 +84,8 @@ devin mcp add -s project browser-harness -- \
         "--directory",
         "<path-to-repo>",
         "run",
+        "--extra",
+        "mcp",
         "python",
         "-m",
         "mcp_server"
@@ -96,5 +99,5 @@ devin mcp add -s project browser-harness -- \
 
 ```bash
 npx @modelcontextprotocol/inspector \
-  uv --directory <path-to-repo> run python -m mcp_server
+  uv --directory <path-to-repo> run --extra mcp python -m mcp_server
 ```
