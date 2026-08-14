@@ -18,6 +18,16 @@ Try browser-harness in [Browser Use Cloud](https://cloud.browser-use.com/v4?utm_
 
 **You will never use the browser again.**
 
+## See it work
+
+**Task:** "Search this certification portal for creatine, export the first 50 results to CSV, and verify the file."
+
+Recorded from a real `browser-harness` CLI run:
+
+https://github.com/user-attachments/assets/0d9e0513-312a-474e-9b81-0110c4073edc
+
+[View the full Showcase →](https://browser-use.com/showcase/export-portal-results-to-csv)
+
 ## Setup prompt
 
 Paste into Claude Code or Codex:
@@ -31,30 +41,17 @@ the checkbox so the agent can connect to your browser:
 
 <img src="docs/setup-remote-debugging.png" alt="Remote debugging setup" width="520" style="border-radius: 12px;" />
 
-## Example tasks
+## Scale with Browser Use Cloud
 
-Set `BH_DOMAIN_SKILLS=1` to let the agent reuse site-specific playbooks:
+Use your local browser for logged-in, personal work. When you want to scale up, Browser Use Cloud runs many browsers in parallel with live previews, proxies, stealth, CAPTCHA solving, and more.
 
-- [Manage LinkedIn invitations](agent-workspace/domain-skills/linkedin/invitation-manager.md)
-- [Search and extract Amazon products](agent-workspace/domain-skills/amazon/product-search.md)
-- [Post to X](agent-workspace/domain-skills/x/posting.md)
-- [Export a QuickBooks report](agent-workspace/domain-skills/qbo/report-export.md)
-- [Upload a TikTok video](agent-workspace/domain-skills/tiktok/upload.md)
-
-[Browse all domain skills →](agent-workspace/domain-skills/)
-
-## Browser Use Cloud
-
-Need stealth, parallel agents, or headless deployment? [Browser Use Cloud](https://cloud.browser-use.com/new-api-key) includes three concurrent browsers, proxies, and CAPTCHA solving on its free tier.
+[Start with Browser Use Cloud →](https://cloud.browser-use.com/new-api-key)
 
 ## How it works
 
-- [`install.md`](install.md) handles first-time installation and browser setup.
-- [`SKILL.md`](SKILL.md) teaches the agent how to use the harness.
-- [`src/browser_harness/`](src/browser_harness/) is the protected core package.
-- `${XDG_CONFIG_HOME:-~/.config}/browser-harness/agent-workspace/` holds helpers and domain skills the agent can edit.
-
-Plain `browser-harness` helper calls attach to the running Chrome/Chromium CDP endpoint. For isolated automation, launch Chrome with `--remote-debugging-port` and pass `BU_CDP_URL`, or use a Browser Use cloud browser.
+- [`install.md`](install.md) connects the agent to your browser.
+- [`SKILL.md`](SKILL.md) teaches it the browser workflow.
+- [`src/browser_harness/`](src/browser_harness/) stays protected while the agent writes reusable helpers in its local workspace.
 
 ## Contributing
 
