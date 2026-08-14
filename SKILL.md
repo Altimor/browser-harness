@@ -50,7 +50,8 @@ On macOS, when Chrome asks for remote-debugging permission, run:
 browser-harness mac-approve
 ```
 
-Continue browser work when it returns `ready`.
+Continue browser work when it returns `ready`; otherwise follow its printed
+instruction.
 
 ## Remote Browsers
 

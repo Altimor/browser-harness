@@ -111,7 +111,10 @@ def approve_remote_debugging() -> tuple[str, str | None]:
         # The user may have accepted the sheet while AppleScript was looking.
         if daemon_browser_ready():
             return "ready", None
-        return "not-found", None
+        return (
+            "not-found",
+            "retry the browser command and run `browser-harness mac-approve` when the prompt appears",
+        )
     return "error", f"unexpected osascript result: {status or '<empty>'}"
 
 

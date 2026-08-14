@@ -61,7 +61,10 @@ def test_mac_approve_returns_not_found_without_a_prompt(monkeypatch):
         lambda *args, **kwargs: SimpleNamespace(returncode=0, stdout="not-found\n", stderr=""),
     )
 
-    assert macos.approve_remote_debugging() == ("not-found", None)
+    status, detail = macos.approve_remote_debugging()
+
+    assert status == "not-found"
+    assert "retry the browser command" in detail
 
 
 def test_mac_approve_returns_ready_without_running_osascript(monkeypatch):

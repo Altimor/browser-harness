@@ -58,9 +58,9 @@ sheet without bringing Chrome to the foreground:
 browser-harness mac-approve
 ```
 
-Retry `page_info()` only when the helper returns `clicked`. The first checkbox
-is intentionally a one-time manual Chrome setup step; it is not exposed to the
-harness until CDP is available.
+Continue browser work when the helper returns `ready`; otherwise follow its
+printed instruction. The first checkbox is intentionally a one-time manual
+Chrome setup step; it is not exposed to the harness until CDP is available.
 
 The helper requires Accessibility permission for the app launching the CLI
 (for example Terminal, iTerm, Codex, or an IDE) in System Settings.
