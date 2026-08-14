@@ -46,6 +46,42 @@ chrome://inspect/#remote-debugging
 
 Ask the user to tick "Allow remote debugging for this browser instance" and click Allow if Chrome shows a permission popup. Then retry the same `browser-harness` command.
 
+On macOS, when the user has explicitly opted into local automatic approval, an
+agent may use Accessibility/System Events for this exact prompt because CDP is
+not available until Chrome approves the connection. Run this only after a
+`permission-blocked` error, never on every command, and only click an `Allow`
+button in a Chrome window whose UI text contains `remote debugging`:
+
+```bash
+osascript <<'APPLESCRIPT'
+set resultText to "not-found"
+tell application "System Events"
+    if exists process "Google Chrome" then
+        tell process "Google Chrome"
+            repeat with w in windows
+                try
+                    set promptText to (value of every static text of w) as text
+                    if promptText contains "remote debugging" then
+                        set buttons to (every button of w whose name is "Allow")
+                        if (count of buttons) is greater than 0 then
+                            click item 1 of buttons
+                            set resultText to "clicked"
+                            exit repeat
+                        end if
+                    end if
+                end try
+            end repeat
+        end tell
+    end if
+end tell
+return resultText
+APPLESCRIPT
+```
+
+Retry only when the script returns `clicked`. This requires Accessibility
+permission for the terminal/agent host in macOS System Settings. Do not use a
+generic coordinate click or click unrelated browser permission dialogs.
+
 ## Remote Browsers
 
 Use Browser Use cloud for headless servers, parallel sub-agents, or isolated work.
