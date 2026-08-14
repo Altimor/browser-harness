@@ -41,7 +41,6 @@ Stealth, sub-agents, or headless deployment.<br>
 **Browser Use Cloud free tier: 3 concurrent browsers, proxies, captcha solving, and more. No card required.**
 
 - Grab a key at [cloud.browser-use.com/new-api-key](https://cloud.browser-use.com/new-api-key)
-- Or let the agent sign up itself via [docs.browser-use.com/llms.txt](https://docs.browser-use.com/llms.txt) (setup flow + challenge context included).
 
 ## Architecture (~1k lines across 4 core files)
 
