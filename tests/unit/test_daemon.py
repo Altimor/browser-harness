@@ -315,7 +315,9 @@ class _AttachCDP(_FakeCDP):
             return {"targetInfos": self.targets}
         if method == "Target.createTarget":
             self.created += 1
-            return {"targetId": f"created-{self.created}"}
+            tid = f"created-{self.created}"
+            self.targets.append({"targetId": tid, "url": "about:blank", "type": "page"})
+            return {"targetId": tid}
         if method == "Target.attachToTarget":
             return {"sessionId": f"session-for-{params['targetId']}"}
         if method == "Target.closeTarget":
@@ -336,7 +338,7 @@ def test_named_daemon_creates_dedicated_tab(monkeypatch):
 
     assert page["targetId"] == "created-1"
     assert d.target_id == "created-1"
-    assert d.owned_target_id == "created-1"
+    assert d.dedicated_target_id == "created-1"
     assert d.session == "session-for-created-1"
     attach_calls = [p for (m, p, _s) in d.cdp.calls if m == "Target.attachToTarget"]
     assert attach_calls == [{"targetId": "created-1", "flatten": True}]
@@ -355,7 +357,7 @@ def test_default_daemon_still_attaches_first_page(monkeypatch):
     page = asyncio.run(d.attach_first_page())
 
     assert page["targetId"] == "user-tab"
-    assert d.owned_target_id is None
+    assert d.dedicated_target_id is None
     assert d.cdp.created == 0
 
 
@@ -371,12 +373,12 @@ def test_named_remote_daemon_keeps_first_page_attach(monkeypatch):
     page = asyncio.run(d.attach_first_page())
 
     assert page["targetId"] == "cloud-blank"
-    assert d.owned_target_id is None
+    assert d.dedicated_target_id is None
     assert d.cdp.created == 0
 
 
-def test_named_reattach_closes_previous_owned_tab_before_creating_another(monkeypatch):
-    """A stale-session retry must not leak the old dedicated tab."""
+def test_named_reattach_reuses_dedicated_tab(monkeypatch):
+    """A stale CDP session should not replace a tab that still exists."""
     monkeypatch.setattr(daemon, "NAME", "worker-a")
     monkeypatch.setattr(daemon, "REMOTE_ID", None)
     monkeypatch.setattr(daemon, "BROWSER_KIND", "cdp")
@@ -384,77 +386,80 @@ def test_named_reattach_closes_previous_owned_tab_before_creating_another(monkey
     d.cdp = _AttachCDP()
 
     asyncio.run(d.attach_first_page())
-    d.target_id = "user-selected-tab"
     asyncio.run(d.attach_first_page())
 
-    assert d.cdp.closed == ["created-1"]
-    assert d.target_id == "created-2"
-    assert d.owned_target_id == "created-2"
-
-
-def test_concurrent_stale_requests_share_one_reattached_tab(monkeypatch):
-    """Concurrent stale-session recovery must create only one replacement tab."""
-    class _ConcurrentStaleCDP(_AttachCDP):
-        def __init__(self):
-            super().__init__()
-            self.release_stale = None
-            self.stale_calls = 0
-            self.retry_sessions = []
-
-        async def send_raw(self, method, params=None, session_id=None):
-            if method == "Runtime.evaluate":
-                self.calls.append((method, params, session_id))
-                if session_id == "stale-session":
-                    self.stale_calls += 1
-                    if self.stale_calls == 2:
-                        self.release_stale.set()
-                    await self.release_stale.wait()
-                    raise RuntimeError("Session with given id not found")
-                self.retry_sessions.append(session_id)
-                return {"session": session_id}
-            return await super().send_raw(method, params, session_id)
-
-    async def run():
-        monkeypatch.setattr(daemon, "NAME", "worker-a")
-        monkeypatch.setattr(daemon, "REMOTE_ID", None)
-        monkeypatch.setattr(daemon, "BROWSER_KIND", "cdp")
-        d = daemon.Daemon()
-        d.cdp = _ConcurrentStaleCDP()
-        d.cdp.release_stale = asyncio.Event()
-        d.session = "stale-session"
-        d.target_id = "old-owned-tab"
-        d.owned_target_id = "old-owned-tab"
-        request = {"method": "Runtime.evaluate", "params": {"expression": "1"}}
-        results = await asyncio.gather(d.handle(request), d.handle(request))
-        return d, results
-
-    d, results = asyncio.run(run())
-
     assert d.cdp.created == 1
-    assert d.cdp.closed == ["old-owned-tab"]
-    assert d.owned_target_id == "created-1"
-    assert d.cdp.retry_sessions == ["session-for-created-1", "session-for-created-1"]
-    assert results == [
-        {"result": {"session": "session-for-created-1"}},
-        {"result": {"session": "session-for-created-1"}},
-    ]
+    assert d.cdp.closed == []
+    assert d.target_id == "created-1"
+    assert d.dedicated_target_id == "created-1"
 
 
-def test_named_attach_failure_closes_created_tab(monkeypatch):
-    """If attach fails after Target.createTarget, the new tab is cleaned up."""
+def test_named_reattach_keeps_selected_tab_when_it_still_exists(monkeypatch):
+    """A deliberate switch_tab remains the active tab after session recovery."""
     monkeypatch.setattr(daemon, "NAME", "worker-a")
     monkeypatch.setattr(daemon, "REMOTE_ID", None)
     monkeypatch.setattr(daemon, "BROWSER_KIND", "cdp")
     d = daemon.Daemon()
-    d.cdp = _AttachCDP(fail_method="Target.attachToTarget")
+    d.cdp = _AttachCDP()
+
+    asyncio.run(d.attach_first_page())
+    d.cdp.targets.append({"targetId": "selected-tab", "url": "https://example.com", "type": "page"})
+    d.target_id = "selected-tab"
+    asyncio.run(d.attach_first_page())
+
+    assert d.cdp.created == 1
+    assert d.cdp.closed == []
+    assert d.target_id == "selected-tab"
+    assert d.dedicated_target_id == "created-1"
+    assert d.session == "session-for-selected-tab"
+
+
+def test_named_reattach_creates_replacement_only_when_tab_is_gone(monkeypatch):
+    """If the user closes the dedicated tab, the daemon creates one replacement."""
+    monkeypatch.setattr(daemon, "NAME", "worker-a")
+    monkeypatch.setattr(daemon, "REMOTE_ID", None)
+    monkeypatch.setattr(daemon, "BROWSER_KIND", "cdp")
+    d = daemon.Daemon()
+    d.cdp = _AttachCDP()
+
+    asyncio.run(d.attach_first_page())
+    d.cdp.targets = [t for t in d.cdp.targets if t["targetId"] != "created-1"]
+    asyncio.run(d.attach_first_page())
+
+    assert d.cdp.created == 2
+    assert d.cdp.closed == []
+    assert d.target_id == "created-2"
+    assert d.dedicated_target_id == "created-2"
+
+
+def test_named_attach_failure_reuses_created_tab_on_retry(monkeypatch):
+    """A transient attach failure leaves the tab available for the next retry."""
+    class _FailOnceAttachCDP(_AttachCDP):
+        def __init__(self):
+            super().__init__()
+            self.fail_attach = True
+
+        async def send_raw(self, method, params=None, session_id=None):
+            if method == "Target.attachToTarget" and self.fail_attach:
+                self.calls.append((method, params, session_id))
+                self.fail_attach = False
+                raise RuntimeError("simulated Target.attachToTarget failure")
+            return await super().send_raw(method, params, session_id)
+
+    monkeypatch.setattr(daemon, "NAME", "worker-a")
+    monkeypatch.setattr(daemon, "REMOTE_ID", None)
+    monkeypatch.setattr(daemon, "BROWSER_KIND", "cdp")
+    d = daemon.Daemon()
+    d.cdp = _FailOnceAttachCDP()
 
     with pytest.raises(RuntimeError, match="Target.attachToTarget"):
         asyncio.run(d.attach_first_page())
+    page = asyncio.run(d.attach_first_page())
 
-    assert d.cdp.closed == ["created-1"]
-    assert d.owned_target_id is None
-    assert d.session is None
-    assert d.target_id is None
+    assert page["targetId"] == "created-1"
+    assert d.cdp.created == 1
+    assert d.cdp.closed == []
+    assert d.dedicated_target_id == "created-1"
 
 
 def test_named_local_attach_cleans_inspect_tabs_before_return(monkeypatch):
@@ -474,50 +479,24 @@ def test_named_local_attach_cleans_inspect_tabs_before_return(monkeypatch):
     assert d.cdp.closed == ["inspect-tab"]
 
 
-def test_owned_cleanup_uses_owned_target_after_tab_switch():
-    """Shutdown must close the daemon tab, not the user's selected tab."""
+def test_main_leaves_dedicated_tab_open(monkeypatch):
+    """Stopping the daemon never closes a working or user tab."""
     d = daemon.Daemon()
     d.cdp = _AttachCDP()
-    d.owned_target_id = "daemon-owned-tab"
-    d.target_id = "user-selected-tab"
 
-    asyncio.run(d._close_owned_target())
+    async def start():
+        d.dedicated_target_id = "daemon-tab"
+        d.target_id = "user-selected-tab"
 
-    assert d.cdp.closed == ["daemon-owned-tab"]
-    assert d.owned_target_id is None
-    assert d.target_id == "user-selected-tab"
+    async def done(_daemon):
+        return None
 
-
-def test_main_retries_owned_tab_cleanup_when_startup_fails(monkeypatch):
-    """Shutdown retries transient close timeouts before exiting."""
-    class _FlakyCloseCDP(_AttachCDP):
-        def __init__(self):
-            super().__init__()
-            self.close_attempts = 0
-
-        async def send_raw(self, method, params=None, session_id=None):
-            if method == "Target.closeTarget":
-                self.calls.append((method, params, session_id))
-                self.close_attempts += 1
-                if self.close_attempts < 3:
-                    raise TimeoutError("simulated close timeout")
-                self.closed.append(params["targetId"])
-                return {}
-            return await super().send_raw(method, params, session_id)
-
-    d = daemon.Daemon()
-    d.cdp = _FlakyCloseCDP()
-
-    async def failed_start():
-        d.owned_target_id = "created-before-startup-failure"
-        raise RuntimeError("simulated startup failure")
-
-    d.start = failed_start
+    d.start = start
     monkeypatch.setattr(daemon, "Daemon", lambda: d)
+    monkeypatch.setattr(daemon, "serve", done)
 
-    with pytest.raises(RuntimeError, match="startup failure"):
-        asyncio.run(daemon.main())
+    asyncio.run(daemon.main())
 
-    assert d.cdp.close_attempts == 3
-    assert d.cdp.closed == ["created-before-startup-failure"]
-    assert d.owned_target_id is None
+    assert d.cdp.closed == []
+    assert d.dedicated_target_id == "daemon-tab"
+    assert d.target_id == "user-selected-tab"
