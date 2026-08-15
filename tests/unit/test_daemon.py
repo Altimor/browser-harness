@@ -392,6 +392,54 @@ def test_named_reattach_closes_previous_owned_tab_before_creating_another(monkey
     assert d.owned_target_id == "created-2"
 
 
+def test_concurrent_stale_requests_share_one_reattached_tab(monkeypatch):
+    """Concurrent stale-session recovery must create only one replacement tab."""
+    class _ConcurrentStaleCDP(_AttachCDP):
+        def __init__(self):
+            super().__init__()
+            self.release_stale = None
+            self.stale_calls = 0
+            self.retry_sessions = []
+
+        async def send_raw(self, method, params=None, session_id=None):
+            if method == "Runtime.evaluate":
+                self.calls.append((method, params, session_id))
+                if session_id == "stale-session":
+                    self.stale_calls += 1
+                    if self.stale_calls == 2:
+                        self.release_stale.set()
+                    await self.release_stale.wait()
+                    raise RuntimeError("Session with given id not found")
+                self.retry_sessions.append(session_id)
+                return {"session": session_id}
+            return await super().send_raw(method, params, session_id)
+
+    async def run():
+        monkeypatch.setattr(daemon, "NAME", "worker-a")
+        monkeypatch.setattr(daemon, "REMOTE_ID", None)
+        monkeypatch.setattr(daemon, "BROWSER_KIND", "cdp")
+        d = daemon.Daemon()
+        d.cdp = _ConcurrentStaleCDP()
+        d.cdp.release_stale = asyncio.Event()
+        d.session = "stale-session"
+        d.target_id = "old-owned-tab"
+        d.owned_target_id = "old-owned-tab"
+        request = {"method": "Runtime.evaluate", "params": {"expression": "1"}}
+        results = await asyncio.gather(d.handle(request), d.handle(request))
+        return d, results
+
+    d, results = asyncio.run(run())
+
+    assert d.cdp.created == 1
+    assert d.cdp.closed == ["old-owned-tab"]
+    assert d.owned_target_id == "created-1"
+    assert d.cdp.retry_sessions == ["session-for-created-1", "session-for-created-1"]
+    assert results == [
+        {"result": {"session": "session-for-created-1"}},
+        {"result": {"session": "session-for-created-1"}},
+    ]
+
+
 def test_named_attach_failure_closes_created_tab(monkeypatch):
     """If attach fails after Target.createTarget, the new tab is cleaned up."""
     monkeypatch.setattr(daemon, "NAME", "worker-a")
@@ -440,10 +488,25 @@ def test_owned_cleanup_uses_owned_target_after_tab_switch():
     assert d.target_id == "user-selected-tab"
 
 
-def test_main_cleans_owned_tab_when_startup_fails(monkeypatch):
-    """The shutdown finally block must also cover failures during start()."""
+def test_main_retries_owned_tab_cleanup_when_startup_fails(monkeypatch):
+    """Shutdown retries transient close timeouts before exiting."""
+    class _FlakyCloseCDP(_AttachCDP):
+        def __init__(self):
+            super().__init__()
+            self.close_attempts = 0
+
+        async def send_raw(self, method, params=None, session_id=None):
+            if method == "Target.closeTarget":
+                self.calls.append((method, params, session_id))
+                self.close_attempts += 1
+                if self.close_attempts < 3:
+                    raise TimeoutError("simulated close timeout")
+                self.closed.append(params["targetId"])
+                return {}
+            return await super().send_raw(method, params, session_id)
+
     d = daemon.Daemon()
-    d.cdp = _AttachCDP()
+    d.cdp = _FlakyCloseCDP()
 
     async def failed_start():
         d.owned_target_id = "created-before-startup-failure"
@@ -455,4 +518,6 @@ def test_main_cleans_owned_tab_when_startup_fails(monkeypatch):
     with pytest.raises(RuntimeError, match="startup failure"):
         asyncio.run(daemon.main())
 
+    assert d.cdp.close_attempts == 3
     assert d.cdp.closed == ["created-before-startup-failure"]
+    assert d.owned_target_id is None

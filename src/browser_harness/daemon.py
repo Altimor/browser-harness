@@ -361,12 +361,18 @@ class Daemon:
         self.session = None
         self.target_id = None
         self.owned_target_id = None  # target created by this named daemon
+        self._attach_lock = asyncio.Lock()
         self.events = deque(maxlen=BUF)
         self.dialog = None
         self.stop = None  # asyncio.Event, set inside start()
 
     async def attach_first_page(self):
         """Attach to a real page (or any page). Sets self.session. Returns attached target or None."""
+        async with self._attach_lock:
+            return await self._attach_first_page_unlocked()
+
+    async def _attach_first_page_unlocked(self):
+        """Attach while the caller holds _attach_lock."""
         targets = (await self.cdp.send_raw("Target.getTargets"))["targetInfos"]
         # Named daemons (BU_NAME != "default") share one browser with other
         # daemons — attaching to the first page makes parallel daemons fight
@@ -458,30 +464,34 @@ class Daemon:
         except OSError:
             pass
 
-    async def _close_owned_target(self):
+    async def _close_owned_target(self, attempts=1):
         """Best-effort close of the tab created by this named daemon.
 
         `target_id` follows the user's current tab after switch_tab/new_tab,
         so it cannot be used for ownership cleanup. Keep the owned target ID
-        separately and retain it when close fails so a later retry does not
-        create another orphan tab.
+        separately. Failed closes retain the ID so this method can retry
+        without ever targeting the user's currently selected tab.
         """
         tid = self.owned_target_id
         if not tid or not self.cdp:
             return True
-        try:
-            await asyncio.wait_for(
-                self.cdp.send_raw("Target.closeTarget", {"targetId": tid}),
-                timeout=2,
-            )
-            log(f"closed owned tab {tid}")
-            self.owned_target_id = None
-            if self.target_id == tid:
-                self.target_id = None
-            return True
-        except Exception as e:
-            log(f"close owned tab {tid}: {e}")
-            return False
+        attempts = max(1, attempts)
+        for attempt in range(1, attempts + 1):
+            try:
+                await asyncio.wait_for(
+                    self.cdp.send_raw("Target.closeTarget", {"targetId": tid}),
+                    timeout=2,
+                )
+                log(f"closed owned tab {tid}")
+                self.owned_target_id = None
+                if self.target_id == tid:
+                    self.target_id = None
+                return True
+            except Exception as e:
+                log(f"close owned tab {tid} (attempt {attempt}/{attempts}): {e}")
+                if attempt < attempts:
+                    await asyncio.sleep(0.1)
+        return False
 
     async def _enable_default_domains(self, session_id):
         """Enable Page/DOM/Runtime/Network on a CDP session.
@@ -635,10 +645,23 @@ class Daemon:
             return {"result": await self.cdp.send_raw(method, params, session_id=sid)}
         except Exception as e:
             msg = str(e)
-            if "Session with given id not found" in msg and sid == self.session and sid:
-                log(f"stale session {sid}, re-attaching")
-                if await self.attach_first_page():
-                    return {"result": await self.cdp.send_raw(method, params, session_id=self.session)}
+            if "Session with given id not found" in msg and sid:
+                # IPC handlers run concurrently. Only one request may replace a
+                # stale session; later requests reuse that replacement instead
+                # of closing it and creating another dedicated tab.
+                async with self._attach_lock:
+                    explicit_session = req.get("session_id")
+                    if sid == self.session:
+                        log(f"stale session {sid}, re-attaching")
+                        if not await self._attach_first_page_unlocked():
+                            return {"error": msg}
+                    elif explicit_session:
+                        return {"error": msg}
+                    if self.session:
+                        try:
+                            return {"result": await self.cdp.send_raw(method, params, session_id=self.session)}
+                        except Exception as retry_error:
+                            return {"error": str(retry_error)}
             return {"error": msg}
 
 
@@ -684,7 +707,7 @@ async def main():
         # Startup can fail after Target.createTarget has succeeded, and the
         # selected tab can change during a normal run. Always clean up by the
         # separately tracked owned target ID.
-        await d._close_owned_target()
+        await d._close_owned_target(attempts=3)
 
 
 def already_running():
