@@ -562,13 +562,15 @@ def test_shutdown_leaves_dedicated_tab_open(monkeypatch):
     assert d.target_id == "user-selected-tab"
 
 
-def test_delayed_implicit_stale_request_retries_its_recovered_session():
-    """A slow stale response follows recovery for its original session."""
-    class _DelayedStaleCDP(_FakeCDP):
+def test_delayed_stale_request_follows_recovery_during_domain_enable(monkeypatch):
+    """Publish the replacement before post-attach domain setup can yield."""
+    class _RecoveryWindowCDP(_FakeCDP):
         def __init__(self):
             super().__init__()
             self.slow_started = None
             self.release_slow = None
+            self.enable_started = None
+            self.release_enables = None
 
         async def send_raw(self, method, params=None, session_id=None):
             self.calls.append((method, params, session_id))
@@ -577,49 +579,52 @@ def test_delayed_implicit_stale_request_retries_its_recovered_session():
                     self.slow_started.set()
                     await self.release_slow.wait()
                 raise RuntimeError("Session with given id not found")
+            if method == "Target.getTargets":
+                return {"targetInfos": [
+                    {"targetId": "same-tab", "url": "https://example.com", "type": "page"}
+                ]}
+            if method == "Target.attachToTarget":
+                return {"sessionId": "replacement-session"}
+            if method.endswith(".enable") and session_id == "replacement-session":
+                self.enable_started.set()
+                await self.release_enables.wait()
+                return {}
             if method == "Runtime.evaluate" and session_id == "replacement-session":
                 return {"value": params["expression"]}
             return {}
 
     async def run():
         d = daemon.Daemon()
-        d.cdp = _DelayedStaleCDP()
+        d.cdp = _RecoveryWindowCDP()
         d.cdp.slow_started = asyncio.Event()
         d.cdp.release_slow = asyncio.Event()
+        d.cdp.enable_started = asyncio.Event()
+        d.cdp.release_enables = asyncio.Event()
         d.session = "stale-session"
-        recoveries = 0
+        d.target_id = "same-tab"
 
-        async def recover():
-            nonlocal recoveries
-            recoveries += 1
-            d.session = "replacement-session"
-            return {"targetId": "same-tab"}
-
-        d.attach_first_page = recover
         slow = asyncio.create_task(d.handle({
             "method": "Runtime.evaluate", "params": {"expression": "slow"}
         }))
         await d.cdp.slow_started.wait()
-        fast = await d.handle({
+        fast = asyncio.create_task(d.handle({
             "method": "Runtime.evaluate", "params": {"expression": "fast"}
-        })
-        # A later tab switch must not redirect the delayed request. Its stale
-        # session maps to the replacement that still controls its original tab.
-        d.session = "user-selected-session"
+        }))
+        await d.cdp.enable_started.wait()
+        # Recovery has attached but is still blocked enabling domains. The
+        # delayed request must already be able to find the replacement.
         d.cdp.release_slow.set()
-        return d, recoveries, fast, await slow
+        slow_result = await slow
+        d.cdp.release_enables.set()
+        return d, await fast, slow_result
 
-    d, recoveries, fast, slow = asyncio.run(run())
+    monkeypatch.setattr(daemon, "NAME", "default")
+    monkeypatch.setattr(daemon, "BROWSER_KIND", "cdp")
+    d, fast, slow = asyncio.run(run())
 
-    assert recoveries == 1
     assert fast == {"result": {"value": "fast"}}
     assert slow == {"result": {"value": "slow"}}
-    retries = [
-        (params["expression"], sid)
-        for method, params, sid in d.cdp.calls
-        if method == "Runtime.evaluate" and sid == "replacement-session"
-    ]
-    assert retries == [("fast", "replacement-session"), ("slow", "replacement-session")]
+    assert d._session_replacements == {"stale-session": "replacement-session"}
 
 
 def test_stale_request_is_not_replayed_after_unrelated_tab_switch():

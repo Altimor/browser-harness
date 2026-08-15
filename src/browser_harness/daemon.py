@@ -367,7 +367,7 @@ class Daemon:
         self.dialog = None
         self.stop = None  # asyncio.Event, set inside start()
 
-    async def attach_first_page(self):
+    async def attach_first_page(self, replaces_session=None):
         """Attach to a real page (or any page). Sets self.session. Returns attached target or None."""
         targets = (await self.cdp.send_raw("Target.getTargets"))["targetInfos"]
         # Named daemons (BU_NAME != "default") share one browser with other
@@ -402,6 +402,7 @@ class Daemon:
             self.session = (await self.cdp.send_raw(
                 "Target.attachToTarget", {"targetId": tid, "flatten": True}
             ))["sessionId"]
+            self._record_session_replacement(replaces_session, self.session)
             self.target_id = tid
             log(f"attached {tid} ({page.get('url','')[:80]}) session={self.session}")
             await self._enable_default_domains(self.session)
@@ -433,6 +434,7 @@ class Daemon:
         self.session = (await self.cdp.send_raw(
             "Target.attachToTarget", {"targetId": pages[0]["targetId"], "flatten": True}
         ))["sessionId"]
+        self._record_session_replacement(replaces_session, self.session)
         self.target_id = pages[0]["targetId"]
         log(f"attached {pages[0]['targetId']} ({pages[0].get('url','')[:80]}) session={self.session}")
         if take_over:
@@ -635,10 +637,9 @@ class Daemon:
                 replacement_session = self._session_replacements.get(sid)
                 if replacement_session is None and sid == self.session:
                     log(f"stale session {sid}, re-attaching")
-                    if not await self.attach_first_page():
+                    if not await self.attach_first_page(replaces_session=sid):
                         return {"error": msg}
-                    replacement_session = self.session
-                    self._record_session_replacement(sid, replacement_session)
+                    replacement_session = self._session_replacements.get(sid)
                 # Retry only on a session known to replace this exact stale
                 # session. self.session may instead have changed because the
                 # user deliberately switched tabs while this request waited.
