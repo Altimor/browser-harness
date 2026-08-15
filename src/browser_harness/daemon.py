@@ -362,6 +362,7 @@ class Daemon:
         self.target_id = None
         self.dedicated_target_id = None
         self._dedicated_target_lock = asyncio.Lock()
+        self._session_replacements = {}
         self.events = deque(maxlen=BUF)
         self.dialog = None
         self.stop = None  # asyncio.Event, set inside start()
@@ -484,6 +485,19 @@ class Daemon:
             except Exception as e:
                 log(f"enable {d} on {session_id}: {e}")
         await asyncio.gather(*(enable_one(d) for d in ("Page", "DOM", "Runtime", "Network")))
+
+    def _record_session_replacement(self, stale_session, replacement_session):
+        """Remember which recovered session still controls the same tab."""
+        if not stale_session or not replacement_session or stale_session == replacement_session:
+            return
+        # Preserve chains so requests delayed across multiple recoveries still
+        # land on their original tab, never whichever tab is current now.
+        for source, replacement in list(self._session_replacements.items()):
+            if replacement == stale_session:
+                self._session_replacements[source] = replacement_session
+        self._session_replacements[stale_session] = replacement_session
+        while len(self._session_replacements) > 32:
+            self._session_replacements.pop(next(iter(self._session_replacements)))
 
     async def start(self):
         self.stop = asyncio.Event()
@@ -618,16 +632,20 @@ class Daemon:
                 # silently redirect them to the daemon's current tab.
                 if req.get("session_id"):
                     return {"error": msg}
-                if sid == self.session:
+                replacement_session = self._session_replacements.get(sid)
+                if replacement_session is None and sid == self.session:
                     log(f"stale session {sid}, re-attaching")
                     if not await self.attach_first_page():
                         return {"error": msg}
-                # Another in-flight request may already have recovered while
-                # this request was waiting for its stale-session response.
-                if self.session and sid != self.session:
+                    replacement_session = self.session
+                    self._record_session_replacement(sid, replacement_session)
+                # Retry only on a session known to replace this exact stale
+                # session. self.session may instead have changed because the
+                # user deliberately switched tabs while this request waited.
+                if replacement_session:
                     try:
                         return {"result": await self.cdp.send_raw(
-                            method, params, session_id=self.session
+                            method, params, session_id=replacement_session
                         )}
                     except Exception as retry_error:
                         return {"error": str(retry_error)}

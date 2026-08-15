@@ -562,8 +562,8 @@ def test_shutdown_leaves_dedicated_tab_open(monkeypatch):
     assert d.target_id == "user-selected-tab"
 
 
-def test_delayed_implicit_stale_request_retries_current_session():
-    """A slow stale response follows recovery completed by another request."""
+def test_delayed_implicit_stale_request_retries_its_recovered_session():
+    """A slow stale response follows recovery for its original session."""
     class _DelayedStaleCDP(_FakeCDP):
         def __init__(self):
             super().__init__()
@@ -603,6 +603,9 @@ def test_delayed_implicit_stale_request_retries_current_session():
         fast = await d.handle({
             "method": "Runtime.evaluate", "params": {"expression": "fast"}
         })
+        # A later tab switch must not redirect the delayed request. Its stale
+        # session maps to the replacement that still controls its original tab.
+        d.session = "user-selected-session"
         d.cdp.release_slow.set()
         return d, recoveries, fast, await slow
 
@@ -617,6 +620,62 @@ def test_delayed_implicit_stale_request_retries_current_session():
         if method == "Runtime.evaluate" and sid == "replacement-session"
     ]
     assert retries == [("fast", "replacement-session"), ("slow", "replacement-session")]
+
+
+def test_stale_request_is_not_replayed_after_unrelated_tab_switch():
+    """set_session must never redirect an older request onto the new tab."""
+    class _SwitchRaceCDP(_FakeCDP):
+        def __init__(self):
+            super().__init__()
+            self.request_started = None
+            self.release_request = None
+
+        async def send_raw(self, method, params=None, session_id=None):
+            self.calls.append((method, params, session_id))
+            if (
+                method == "Runtime.evaluate"
+                and params.get("expression") == "old-tab-action"
+                and session_id == "old-session"
+            ):
+                self.request_started.set()
+                await self.release_request.wait()
+                raise RuntimeError("Session with given id not found")
+            return {}
+
+    async def run():
+        d = daemon.Daemon()
+        d.cdp = _SwitchRaceCDP()
+        d.cdp.request_started = asyncio.Event()
+        d.cdp.release_request = asyncio.Event()
+        d.session = "old-session"
+        d.target_id = "old-tab"
+
+        request = asyncio.create_task(d.handle({
+            "method": "Runtime.evaluate",
+            "params": {"expression": "old-tab-action"},
+        }))
+        await d.cdp.request_started.wait()
+        await d.handle({
+            "meta": "set_session",
+            "session_id": "new-session",
+            "target_id": "new-tab",
+        })
+        d.cdp.release_request.set()
+        result = await request
+        await asyncio.sleep(0)  # let the cosmetic marker task finish
+        return d, result
+
+    d, result = asyncio.run(run())
+
+    assert result == {"error": "Session with given id not found"}
+    redirected = [
+        (params, sid)
+        for method, params, sid in d.cdp.calls
+        if method == "Runtime.evaluate"
+        and params.get("expression") == "old-tab-action"
+        and sid == "new-session"
+    ]
+    assert redirected == []
 
 
 def test_explicit_stale_session_is_not_redirected():
