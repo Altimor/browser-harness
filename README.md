@@ -20,9 +20,9 @@ Try browser-harness in [Browser Use Cloud](https://cloud.browser-use.com/v4?utm_
 
 ## See it work
 
-**Task:** "Find a nonstop round trip from San Francisco to Los Angeles for September 18–20, compare the live options, and stop before booking."
+**Task:** "Open my X profile, find my latest 20 video posts, and download them."
 
-<video controls muted playsinline width="100%" src="https://raw.githubusercontent.com/browser-use/browser-harness/main/docs/find-bookable-flight.mp4"></video>
+[![Download my latest 20 X videos](docs/download-latest-20-x-videos.gif)](https://browser-use.com/showcase/videos/download-latest-20-x-videos.mp4)
 
 ## Setup prompt
 
