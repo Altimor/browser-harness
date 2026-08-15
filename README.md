@@ -20,11 +20,9 @@ Try browser-harness in [Browser Use Cloud](https://cloud.browser-use.com/v4?utm_
 
 ## See it work
 
-**Task:** "Get us two good seats for PAW Patrol at 7 PM near San Francisco. Stop before checkout."
+**Task:** "Find a nonstop round trip from San Francisco to Los Angeles for September 18–20, compare the live options, and stop before booking."
 
-https://github.com/user-attachments/assets/ee5406ee-35d9-4c0c-b397-aef399611934
-
-[View the full Showcase →](https://browser-use.com/showcase/pick-adjacent-cinema-seats)
+<video controls muted playsinline width="100%" src="https://raw.githubusercontent.com/browser-use/browser-harness/main/docs/find-bookable-flight.mp4"></video>
 
 ## Setup prompt
 
@@ -39,17 +37,15 @@ the checkbox so the agent can connect to your browser:
 
 <img src="docs/setup-remote-debugging.png" alt="Remote debugging setup" width="520" style="border-radius: 12px;" />
 
-## Scale with Browser Use Cloud
-
-Use your local browser for logged-in, personal work. When you want to scale up, Browser Use Cloud runs many browsers in parallel with live previews, proxies, stealth, CAPTCHA solving, and more.
-
-[Start with Browser Use Cloud →](https://cloud.browser-use.com/new-api-key)
-
 ## How it works
 
 - [`install.md`](install.md) connects the agent to your browser.
 - [`SKILL.md`](SKILL.md) teaches it the browser workflow.
 - [`src/browser_harness/`](src/browser_harness/) stays protected while the agent writes reusable helpers in its local workspace.
+
+## Scale with Browser Use Cloud
+
+Use your local browser for logged-in, personal work. When you want many browsers in parallel—with live previews, proxies, stealth, CAPTCHA solving, and more—scale with [Browser Use Cloud](https://cloud.browser-use.com/new-api-key).
 
 ## Contributing
 
