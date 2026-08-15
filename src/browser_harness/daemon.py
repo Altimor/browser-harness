@@ -362,12 +362,13 @@ class Daemon:
         self.target_id = None
         self.dedicated_target_id = None
         self._dedicated_target_lock = asyncio.Lock()
+        self._session_state_lock = asyncio.Lock()
         self._session_replacements = {}
         self.events = deque(maxlen=BUF)
         self.dialog = None
         self.stop = None  # asyncio.Event, set inside start()
 
-    async def attach_first_page(self, replaces_session=None):
+    async def attach_first_page(self, replaces_session=None, enable_domains=True):
         """Attach to a real page (or any page). Sets self.session. Returns attached target or None."""
         targets = (await self.cdp.send_raw("Target.getTargets"))["targetInfos"]
         # Named daemons (BU_NAME != "default") share one browser with other
@@ -405,7 +406,8 @@ class Daemon:
             self._record_session_replacement(replaces_session, self.session)
             self.target_id = tid
             log(f"attached {tid} ({page.get('url','')[:80]}) session={self.session}")
-            await self._enable_default_domains(self.session)
+            if enable_domains:
+                await self._enable_default_domains(self.session)
             return page
 
         pages = [t for t in targets if is_real_page(t)]
@@ -445,7 +447,8 @@ class Daemon:
                 log(f"take over inspect tab {take_over}: {e}")
         if BROWSER_KIND == "local":
             await self._close_inspect_tabs(targets)
-        await self._enable_default_domains(self.session)
+        if enable_domains:
+            await self._enable_default_domains(self.session)
         return pages[0]
 
     async def _close_inspect_tabs(self, targets):
@@ -583,9 +586,11 @@ class Daemon:
                 }
             return {"target_id": self.target_id, "session_id": self.session, "page": page}
         if meta == "set_session":
-            old_session = self.session
-            self.session = req.get("session_id")
-            self.target_id = req.get("target_id") or self.target_id
+            async with self._session_state_lock:
+                old_session = self.session
+                self.session = req.get("session_id")
+                self.target_id = req.get("target_id") or self.target_id
+                new_session = self.session
             # Run the old-session Network.disable (defense in depth — keeps
             # background-tab traffic out of the global event buffer; the
             # consumer-side filter in wait_for_network_idle is the actual
@@ -595,7 +600,7 @@ class Daemon:
             # even on a remote daemon — sequentially these would have stacked
             # to ~22s worst case.
             tasks = []
-            if old_session and old_session != self.session:
+            if old_session and old_session != new_session:
                 async def disable_old():
                     try:
                         await asyncio.wait_for(
@@ -604,7 +609,7 @@ class Daemon:
                         )
                     except Exception: pass
                 tasks.append(disable_old())
-            tasks.append(self._enable_default_domains(self.session))
+            tasks.append(self._enable_default_domains(new_session))
             await asyncio.gather(*tasks)
             # 🐴 tab-marker title prefix is purely cosmetic — fire-and-forget so
             # it doesn't add to the synchronous IPC budget.
@@ -612,11 +617,11 @@ class Daemon:
                 self.cdp.send_raw(
                     "Runtime.evaluate",
                     {"expression": "if(!document.title.startsWith('\U0001F434'))document.title='\U0001F434 '+document.title"},
-                    session_id=self.session,
+                    session_id=new_session,
                 ),
                 timeout=2,
             )))
-            return {"session_id": self.session}
+            return {"session_id": new_session}
         if meta == "pending_dialog": return {"dialog": self.dialog}
         if meta == "shutdown":    self.stop.set(); return {"ok": True}
 
@@ -634,12 +639,19 @@ class Daemon:
                 # silently redirect them to the daemon's current tab.
                 if req.get("session_id"):
                     return {"error": msg}
-                replacement_session = self._session_replacements.get(sid)
-                if replacement_session is None and sid == self.session:
-                    log(f"stale session {sid}, re-attaching")
-                    if not await self.attach_first_page(replaces_session=sid):
-                        return {"error": msg}
+                recovered_here = False
+                async with self._session_state_lock:
                     replacement_session = self._session_replacements.get(sid)
+                    if replacement_session is None and sid == self.session:
+                        log(f"stale session {sid}, re-attaching")
+                        if not await self.attach_first_page(
+                            replaces_session=sid, enable_domains=False
+                        ):
+                            return {"error": msg}
+                        replacement_session = self._session_replacements.get(sid)
+                        recovered_here = replacement_session is not None
+                if recovered_here:
+                    await self._enable_default_domains(replacement_session)
                 # Retry only on a session known to replace this exact stale
                 # session. self.session may instead have changed because the
                 # user deliberately switched tabs while this request waited.

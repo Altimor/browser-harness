@@ -627,13 +627,13 @@ def test_delayed_stale_request_follows_recovery_during_domain_enable(monkeypatch
     assert d._session_replacements == {"stale-session": "replacement-session"}
 
 
-def test_stale_request_is_not_replayed_after_unrelated_tab_switch():
-    """set_session must never redirect an older request onto the new tab."""
+def test_tab_switch_waits_for_recovery_and_keeps_old_action_on_old_tab(monkeypatch):
+    """A switch during target discovery cannot redirect the recovered action."""
     class _SwitchRaceCDP(_FakeCDP):
         def __init__(self):
             super().__init__()
-            self.request_started = None
-            self.release_request = None
+            self.discovery_started = None
+            self.release_discovery = None
 
         async def send_raw(self, method, params=None, session_id=None):
             self.calls.append((method, params, session_id))
@@ -642,16 +642,28 @@ def test_stale_request_is_not_replayed_after_unrelated_tab_switch():
                 and params.get("expression") == "old-tab-action"
                 and session_id == "old-session"
             ):
-                self.request_started.set()
-                await self.release_request.wait()
                 raise RuntimeError("Session with given id not found")
+            if method == "Target.getTargets":
+                self.discovery_started.set()
+                await self.release_discovery.wait()
+                return {"targetInfos": [
+                    {"targetId": "old-tab", "url": "https://example.com", "type": "page"}
+                ]}
+            if method == "Target.attachToTarget":
+                return {"sessionId": "recovered-old-session"}
+            if (
+                method == "Runtime.evaluate"
+                and params.get("expression") == "old-tab-action"
+                and session_id == "recovered-old-session"
+            ):
+                return {"value": "old-tab-action"}
             return {}
 
     async def run():
         d = daemon.Daemon()
         d.cdp = _SwitchRaceCDP()
-        d.cdp.request_started = asyncio.Event()
-        d.cdp.release_request = asyncio.Event()
+        d.cdp.discovery_started = asyncio.Event()
+        d.cdp.release_discovery = asyncio.Event()
         d.session = "old-session"
         d.target_id = "old-tab"
 
@@ -659,20 +671,27 @@ def test_stale_request_is_not_replayed_after_unrelated_tab_switch():
             "method": "Runtime.evaluate",
             "params": {"expression": "old-tab-action"},
         }))
-        await d.cdp.request_started.wait()
-        await d.handle({
+        await d.cdp.discovery_started.wait()
+        switch = asyncio.create_task(d.handle({
             "meta": "set_session",
             "session_id": "new-session",
             "target_id": "new-tab",
-        })
-        d.cdp.release_request.set()
-        result = await request
+        }))
+        await asyncio.sleep(0)  # let set_session wait on the recovery lock
+        d.cdp.release_discovery.set()
+        result, switch_result = await asyncio.gather(request, switch)
         await asyncio.sleep(0)  # let the cosmetic marker task finish
-        return d, result
+        return d, result, switch_result
 
-    d, result = asyncio.run(run())
+    monkeypatch.setattr(daemon, "NAME", "default")
+    monkeypatch.setattr(daemon, "BROWSER_KIND", "cdp")
+    d, result, switch_result = asyncio.run(run())
 
-    assert result == {"error": "Session with given id not found"}
+    assert result == {"result": {"value": "old-tab-action"}}
+    assert switch_result == {"session_id": "new-session"}
+    assert d.session == "new-session"
+    assert d.target_id == "new-tab"
+    assert d._session_replacements == {"old-session": "recovered-old-session"}
     redirected = [
         (params, sid)
         for method, params, sid in d.cdp.calls
