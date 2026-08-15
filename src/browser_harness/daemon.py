@@ -361,6 +361,7 @@ class Daemon:
         self.session = None
         self.target_id = None
         self.dedicated_target_id = None
+        self._dedicated_target_lock = asyncio.Lock()
         self.events = deque(maxlen=BUF)
         self.dialog = None
         self.stop = None  # asyncio.Event, set inside start()
@@ -383,10 +384,17 @@ class Daemon:
             # Reattach to the current tab first, then the daemon's dedicated tab.
             page = pages_by_id.get(self.target_id) or pages_by_id.get(self.dedicated_target_id)
             if page is None:
-                tid = (await self.cdp.send_raw("Target.createTarget", {"url": "about:blank"}))["targetId"]
-                self.dedicated_target_id = tid
-                log(f"named daemon {NAME}: created dedicated tab ({tid})")
-                page = {"targetId": tid, "url": "about:blank", "type": "page"}
+                # Two stale IPC requests can recover concurrently. Recheck
+                # inside a narrow lock so they share one replacement tab.
+                async with self._dedicated_target_lock:
+                    refreshed = (await self.cdp.send_raw("Target.getTargets"))["targetInfos"]
+                    pages_by_id = {t["targetId"]: t for t in refreshed if t["type"] == "page"}
+                    page = pages_by_id.get(self.target_id) or pages_by_id.get(self.dedicated_target_id)
+                    if page is None:
+                        tid = (await self.cdp.send_raw("Target.createTarget", {"url": "about:blank"}))["targetId"]
+                        self.dedicated_target_id = tid
+                        log(f"named daemon {NAME}: created dedicated tab ({tid})")
+                        page = {"targetId": tid, "url": "about:blank", "type": "page"}
             tid = page["targetId"]
             self.session = (await self.cdp.send_raw(
                 "Target.attachToTarget", {"targetId": tid, "flatten": True}

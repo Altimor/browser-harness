@@ -432,6 +432,44 @@ def test_named_reattach_creates_replacement_only_when_tab_is_gone(monkeypatch):
     assert d.dedicated_target_id == "created-2"
 
 
+def test_concurrent_named_reattach_creates_one_replacement(monkeypatch):
+    """Concurrent recovery after a user closes the tab shares one replacement."""
+    class _ConcurrentAttachCDP(_AttachCDP):
+        def __init__(self):
+            super().__init__()
+            self.get_calls = 0
+            self.first_gets_done = asyncio.Event()
+
+        async def send_raw(self, method, params=None, session_id=None):
+            if method == "Target.getTargets":
+                self.calls.append((method, params, session_id))
+                snapshot = list(self.targets)
+                self.get_calls += 1
+                if self.get_calls <= 2:
+                    if self.get_calls == 2:
+                        self.first_gets_done.set()
+                    await self.first_gets_done.wait()
+                return {"targetInfos": snapshot}
+            return await super().send_raw(method, params, session_id)
+
+    async def run():
+        d = daemon.Daemon()
+        d.cdp = _ConcurrentAttachCDP()
+        pages = await asyncio.gather(d.attach_first_page(), d.attach_first_page())
+        return d, pages
+
+    monkeypatch.setattr(daemon, "NAME", "worker-a")
+    monkeypatch.setattr(daemon, "REMOTE_ID", None)
+    monkeypatch.setattr(daemon, "BROWSER_KIND", "cdp")
+    d, pages = asyncio.run(run())
+
+    assert [page["targetId"] for page in pages] == ["created-1", "created-1"]
+    assert d.cdp.created == 1
+    assert d.cdp.closed == []
+    assert d.target_id == "created-1"
+    assert d.dedicated_target_id == "created-1"
+
+
 def test_named_attach_failure_reuses_created_tab_on_retry(monkeypatch):
     """A transient attach failure leaves the tab available for the next retry."""
     class _FailOnceAttachCDP(_AttachCDP):
