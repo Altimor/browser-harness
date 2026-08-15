@@ -1,5 +1,7 @@
 import asyncio
 
+import pytest
+
 from browser_harness import daemon
 
 
@@ -293,3 +295,164 @@ def test_current_tab_meta_returns_not_attached_when_no_target_id():
     assert result == {"error": "not_attached"}
     # No CDP call should have been issued.
     assert d.cdp.calls == []
+
+
+class _AttachCDP(_FakeCDP):
+    """FakeCDP with realistic responses for the attach flow."""
+
+    def __init__(self, targets=None, fail_method=None):
+        super().__init__()
+        self.targets = targets or []
+        self.created = 0
+        self.closed = []
+        self.fail_method = fail_method
+
+    async def send_raw(self, method, params=None, session_id=None):
+        self.calls.append((method, params, session_id))
+        if method == self.fail_method:
+            raise RuntimeError(f"simulated {method} failure")
+        if method == "Target.getTargets":
+            return {"targetInfos": self.targets}
+        if method == "Target.createTarget":
+            self.created += 1
+            return {"targetId": f"created-{self.created}"}
+        if method == "Target.attachToTarget":
+            return {"sessionId": f"session-for-{params['targetId']}"}
+        if method == "Target.closeTarget":
+            self.closed.append(params["targetId"])
+        return {}
+
+
+def test_named_daemon_creates_dedicated_tab(monkeypatch):
+    """Named local/CDP daemons must not fight over the first existing tab."""
+    monkeypatch.setattr(daemon, "NAME", "worker-a")
+    monkeypatch.setattr(daemon, "REMOTE_ID", None)
+    monkeypatch.setattr(daemon, "BROWSER_KIND", "cdp")
+    existing = [{"targetId": "someone-elses-tab", "url": "https://example.com/", "type": "page"}]
+    d = daemon.Daemon()
+    d.cdp = _AttachCDP(existing)
+
+    page = asyncio.run(d.attach_first_page())
+
+    assert page["targetId"] == "created-1"
+    assert d.target_id == "created-1"
+    assert d.owned_target_id == "created-1"
+    assert d.session == "session-for-created-1"
+    attach_calls = [p for (m, p, _s) in d.cdp.calls if m == "Target.attachToTarget"]
+    assert attach_calls == [{"targetId": "created-1", "flatten": True}]
+    enabled = {m for (m, _p, s) in d.cdp.calls if s == d.session and m.endswith(".enable")}
+    assert enabled == {"Page.enable", "DOM.enable", "Runtime.enable", "Network.enable"}
+
+
+def test_default_daemon_still_attaches_first_page(monkeypatch):
+    """The default daemon keeps reusing the user's first real page."""
+    monkeypatch.setattr(daemon, "NAME", "default")
+    monkeypatch.setattr(daemon, "REMOTE_ID", None)
+    existing = [{"targetId": "user-tab", "url": "https://example.com/", "type": "page"}]
+    d = daemon.Daemon()
+    d.cdp = _AttachCDP(existing)
+
+    page = asyncio.run(d.attach_first_page())
+
+    assert page["targetId"] == "user-tab"
+    assert d.owned_target_id is None
+    assert d.cdp.created == 0
+
+
+def test_named_remote_daemon_keeps_first_page_attach(monkeypatch):
+    """A cloud browser is exclusive, so a named cloud daemon needs no extra tab."""
+    monkeypatch.setattr(daemon, "NAME", "r7k2")
+    monkeypatch.setattr(daemon, "REMOTE_ID", "remote-browser-id")
+    monkeypatch.setattr(daemon, "BROWSER_KIND", "cloud")
+    existing = [{"targetId": "cloud-blank", "url": "about:blank", "type": "page"}]
+    d = daemon.Daemon()
+    d.cdp = _AttachCDP(existing)
+
+    page = asyncio.run(d.attach_first_page())
+
+    assert page["targetId"] == "cloud-blank"
+    assert d.owned_target_id is None
+    assert d.cdp.created == 0
+
+
+def test_named_reattach_closes_previous_owned_tab_before_creating_another(monkeypatch):
+    """A stale-session retry must not leak the old dedicated tab."""
+    monkeypatch.setattr(daemon, "NAME", "worker-a")
+    monkeypatch.setattr(daemon, "REMOTE_ID", None)
+    monkeypatch.setattr(daemon, "BROWSER_KIND", "cdp")
+    d = daemon.Daemon()
+    d.cdp = _AttachCDP()
+
+    asyncio.run(d.attach_first_page())
+    d.target_id = "user-selected-tab"
+    asyncio.run(d.attach_first_page())
+
+    assert d.cdp.closed == ["created-1"]
+    assert d.target_id == "created-2"
+    assert d.owned_target_id == "created-2"
+
+
+def test_named_attach_failure_closes_created_tab(monkeypatch):
+    """If attach fails after Target.createTarget, the new tab is cleaned up."""
+    monkeypatch.setattr(daemon, "NAME", "worker-a")
+    monkeypatch.setattr(daemon, "REMOTE_ID", None)
+    monkeypatch.setattr(daemon, "BROWSER_KIND", "cdp")
+    d = daemon.Daemon()
+    d.cdp = _AttachCDP(fail_method="Target.attachToTarget")
+
+    with pytest.raises(RuntimeError, match="Target.attachToTarget"):
+        asyncio.run(d.attach_first_page())
+
+    assert d.cdp.closed == ["created-1"]
+    assert d.owned_target_id is None
+    assert d.session is None
+    assert d.target_id is None
+
+
+def test_named_local_attach_cleans_inspect_tabs_before_return(monkeypatch):
+    """The named-daemon early path must retain local inspect-tab cleanup."""
+    monkeypatch.setattr(daemon, "NAME", "worker-a")
+    monkeypatch.setattr(daemon, "REMOTE_ID", None)
+    monkeypatch.setattr(daemon, "BROWSER_KIND", "local")
+    monkeypatch.setattr(daemon, "harness_opened_inspect", lambda: True)
+    inspect = {"targetId": "inspect-tab", "url": "chrome://inspect/#remote-debugging", "type": "page"}
+    d = daemon.Daemon()
+    d.cdp = _AttachCDP([inspect])
+
+    asyncio.run(d.attach_first_page())
+
+    methods = [method for method, _params, _session in d.cdp.calls]
+    assert methods.index("Target.closeTarget") < methods.index("Target.createTarget")
+    assert d.cdp.closed == ["inspect-tab"]
+
+
+def test_owned_cleanup_uses_owned_target_after_tab_switch():
+    """Shutdown must close the daemon tab, not the user's selected tab."""
+    d = daemon.Daemon()
+    d.cdp = _AttachCDP()
+    d.owned_target_id = "daemon-owned-tab"
+    d.target_id = "user-selected-tab"
+
+    asyncio.run(d._close_owned_target())
+
+    assert d.cdp.closed == ["daemon-owned-tab"]
+    assert d.owned_target_id is None
+    assert d.target_id == "user-selected-tab"
+
+
+def test_main_cleans_owned_tab_when_startup_fails(monkeypatch):
+    """The shutdown finally block must also cover failures during start()."""
+    d = daemon.Daemon()
+    d.cdp = _AttachCDP()
+
+    async def failed_start():
+        d.owned_target_id = "created-before-startup-failure"
+        raise RuntimeError("simulated startup failure")
+
+    d.start = failed_start
+    monkeypatch.setattr(daemon, "Daemon", lambda: d)
+
+    with pytest.raises(RuntimeError, match="startup failure"):
+        asyncio.run(daemon.main())
+
+    assert d.cdp.closed == ["created-before-startup-failure"]

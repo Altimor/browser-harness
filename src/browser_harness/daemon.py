@@ -360,6 +360,7 @@ class Daemon:
         self.cdp = None
         self.session = None
         self.target_id = None
+        self.owned_target_id = None  # target created by this named daemon
         self.events = deque(maxlen=BUF)
         self.dialog = None
         self.stop = None  # asyncio.Event, set inside start()
@@ -367,6 +368,43 @@ class Daemon:
     async def attach_first_page(self):
         """Attach to a real page (or any page). Sets self.session. Returns attached target or None."""
         targets = (await self.cdp.send_raw("Target.getTargets"))["targetInfos"]
+        # Named daemons (BU_NAME != "default") share one browser with other
+        # daemons — attaching to the first page makes parallel daemons fight
+        # over a single tab (navigations clobber each other). Give each named
+        # daemon its own dedicated tab instead. REMOTE_ID (cloud) browsers are
+        # already exclusive to this daemon, so first-page attach stays.
+        if NAME != "default" and not REMOTE_ID:
+            # The permission recovery flow can leave chrome://inspect open.
+            # Clean it up before returning from this early path as well.
+            if BROWSER_KIND == "local":
+                await self._close_inspect_tabs(targets)
+            if self.owned_target_id and not await self._close_owned_target():
+                raise RuntimeError(
+                    f"cannot close previously owned tab {self.owned_target_id}; refusing to create another"
+                )
+
+            tid = None
+            try:
+                tid = (await self.cdp.send_raw("Target.createTarget", {"url": "about:blank"}))["targetId"]
+                # Record ownership immediately: attach or domain setup can fail
+                # after Target.createTarget has already made a real tab.
+                self.owned_target_id = tid
+                log(f"named daemon {NAME}: created dedicated tab ({tid})")
+                page = {"targetId": tid, "url": "about:blank", "type": "page"}
+                self.session = (await self.cdp.send_raw(
+                    "Target.attachToTarget", {"targetId": tid, "flatten": True}
+                ))["sessionId"]
+                self.target_id = tid
+                log(f"attached {tid} (about:blank) session={self.session}")
+                await self._enable_default_domains(self.session)
+                return page
+            except Exception:
+                await self._close_owned_target()
+                self.session = None
+                if self.target_id == tid:
+                    self.target_id = None
+                raise
+
         pages = [t for t in targets if is_real_page(t)]
         if not pages:
             # Fresh browser (ex: BU cloud) starts w about:blank; reuse it
@@ -419,6 +457,31 @@ class Daemon:
             paths.inspect_marker().unlink()
         except OSError:
             pass
+
+    async def _close_owned_target(self):
+        """Best-effort close of the tab created by this named daemon.
+
+        `target_id` follows the user's current tab after switch_tab/new_tab,
+        so it cannot be used for ownership cleanup. Keep the owned target ID
+        separately and retain it when close fails so a later retry does not
+        create another orphan tab.
+        """
+        tid = self.owned_target_id
+        if not tid or not self.cdp:
+            return True
+        try:
+            await asyncio.wait_for(
+                self.cdp.send_raw("Target.closeTarget", {"targetId": tid}),
+                timeout=2,
+            )
+            log(f"closed owned tab {tid}")
+            self.owned_target_id = None
+            if self.target_id == tid:
+                self.target_id = None
+            return True
+        except Exception as e:
+            log(f"close owned tab {tid}: {e}")
+            return False
 
     async def _enable_default_domains(self, session_id):
         """Enable Page/DOM/Runtime/Network on a CDP session.
@@ -614,8 +677,14 @@ async def serve(d):
 
 async def main():
     d = Daemon()
-    await d.start()
-    await serve(d)
+    try:
+        await d.start()
+        await serve(d)
+    finally:
+        # Startup can fail after Target.createTarget has succeeded, and the
+        # selected tab can change during a normal run. Always clean up by the
+        # separately tracked owned target ID.
+        await d._close_owned_target()
 
 
 def already_running():
