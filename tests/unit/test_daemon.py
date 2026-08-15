@@ -342,6 +342,8 @@ def test_named_daemon_creates_dedicated_tab(monkeypatch):
     assert d.session == "session-for-created-1"
     attach_calls = [p for (m, p, _s) in d.cdp.calls if m == "Target.attachToTarget"]
     assert attach_calls == [{"targetId": "created-1", "flatten": True}]
+    create_calls = [p for (m, p, _s) in d.cdp.calls if m == "Target.createTarget"]
+    assert create_calls == [{"url": "about:blank", "background": True}]
     enabled = {m for (m, _p, s) in d.cdp.calls if s == d.session and m.endswith(".enable")}
     assert enabled == {"Page.enable", "DOM.enable", "Runtime.enable", "Network.enable"}
 
@@ -359,6 +361,21 @@ def test_default_daemon_still_attaches_first_page(monkeypatch):
     assert page["targetId"] == "user-tab"
     assert d.dedicated_target_id is None
     assert d.cdp.created == 0
+
+
+def test_default_daemon_creates_missing_page_in_background(monkeypatch):
+    """Fallback tabs must not steal the user's foreground Chrome tab."""
+    monkeypatch.setattr(daemon, "NAME", "default")
+    monkeypatch.setattr(daemon, "REMOTE_ID", None)
+    monkeypatch.setattr(daemon, "BROWSER_KIND", "cdp")
+    d = daemon.Daemon()
+    d.cdp = _AttachCDP()
+
+    page = asyncio.run(d.attach_first_page())
+
+    assert page["targetId"] == "created-1"
+    create_calls = [p for (m, p, _s) in d.cdp.calls if m == "Target.createTarget"]
+    assert create_calls == [{"url": "about:blank", "background": True}]
 
 
 def test_named_remote_daemon_keeps_first_page_attach(monkeypatch):
@@ -517,24 +534,109 @@ def test_named_local_attach_cleans_inspect_tabs_before_return(monkeypatch):
     assert d.cdp.closed == ["inspect-tab"]
 
 
-def test_main_leaves_dedicated_tab_open(monkeypatch):
-    """Stopping the daemon never closes a working or user tab."""
+def test_shutdown_leaves_dedicated_tab_open(monkeypatch):
+    """The real serve shutdown path never closes a working or user tab."""
     d = daemon.Daemon()
     d.cdp = _AttachCDP()
 
     async def start():
         d.dedicated_target_id = "daemon-tab"
         d.target_id = "user-selected-tab"
+        d.stop = asyncio.Event()
+        d.stop.set()
 
-    async def done(_daemon):
-        return None
+    async def wait_forever(*_args):
+        await asyncio.Event().wait()
 
     d.start = start
     monkeypatch.setattr(daemon, "Daemon", lambda: d)
-    monkeypatch.setattr(daemon, "serve", done)
+    monkeypatch.setattr(daemon.ipc, "serve", wait_forever)
+    monkeypatch.setattr(daemon.ipc, "sock_addr", lambda _name: "test-socket")
+    monkeypatch.setattr(daemon.ipc, "cleanup_endpoint", lambda _name: None)
+    monkeypatch.setattr(daemon, "log", lambda _message: None)
 
     asyncio.run(daemon.main())
 
     assert d.cdp.closed == []
     assert d.dedicated_target_id == "daemon-tab"
     assert d.target_id == "user-selected-tab"
+
+
+def test_delayed_implicit_stale_request_retries_current_session():
+    """A slow stale response follows recovery completed by another request."""
+    class _DelayedStaleCDP(_FakeCDP):
+        def __init__(self):
+            super().__init__()
+            self.slow_started = None
+            self.release_slow = None
+
+        async def send_raw(self, method, params=None, session_id=None):
+            self.calls.append((method, params, session_id))
+            if method == "Runtime.evaluate" and session_id == "stale-session":
+                if params["expression"] == "slow":
+                    self.slow_started.set()
+                    await self.release_slow.wait()
+                raise RuntimeError("Session with given id not found")
+            if method == "Runtime.evaluate" and session_id == "replacement-session":
+                return {"value": params["expression"]}
+            return {}
+
+    async def run():
+        d = daemon.Daemon()
+        d.cdp = _DelayedStaleCDP()
+        d.cdp.slow_started = asyncio.Event()
+        d.cdp.release_slow = asyncio.Event()
+        d.session = "stale-session"
+        recoveries = 0
+
+        async def recover():
+            nonlocal recoveries
+            recoveries += 1
+            d.session = "replacement-session"
+            return {"targetId": "same-tab"}
+
+        d.attach_first_page = recover
+        slow = asyncio.create_task(d.handle({
+            "method": "Runtime.evaluate", "params": {"expression": "slow"}
+        }))
+        await d.cdp.slow_started.wait()
+        fast = await d.handle({
+            "method": "Runtime.evaluate", "params": {"expression": "fast"}
+        })
+        d.cdp.release_slow.set()
+        return d, recoveries, fast, await slow
+
+    d, recoveries, fast, slow = asyncio.run(run())
+
+    assert recoveries == 1
+    assert fast == {"result": {"value": "fast"}}
+    assert slow == {"result": {"value": "slow"}}
+    retries = [
+        (params["expression"], sid)
+        for method, params, sid in d.cdp.calls
+        if method == "Runtime.evaluate" and sid == "replacement-session"
+    ]
+    assert retries == [("fast", "replacement-session"), ("slow", "replacement-session")]
+
+
+def test_explicit_stale_session_is_not_redirected():
+    """Explicit session requests retain their exact-session semantics."""
+    class _AlwaysStaleCDP(_FakeCDP):
+        async def send_raw(self, method, params=None, session_id=None):
+            self.calls.append((method, params, session_id))
+            raise RuntimeError("Session with given id not found")
+
+    d = daemon.Daemon()
+    d.cdp = _AlwaysStaleCDP()
+    d.session = "current-session"
+
+    result = asyncio.run(d.handle({
+        "method": "Runtime.evaluate",
+        "params": {"expression": "1"},
+        "session_id": "explicit-stale-session",
+    }))
+
+    assert result == {"error": "Session with given id not found"}
+    assert d.cdp.calls == [
+        ("Runtime.evaluate", {"expression": "1"}, "explicit-stale-session")
+    ]

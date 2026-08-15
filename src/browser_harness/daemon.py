@@ -391,7 +391,9 @@ class Daemon:
                     pages_by_id = {t["targetId"]: t for t in refreshed if t["type"] == "page"}
                     page = pages_by_id.get(self.target_id) or pages_by_id.get(self.dedicated_target_id)
                     if page is None:
-                        tid = (await self.cdp.send_raw("Target.createTarget", {"url": "about:blank"}))["targetId"]
+                        tid = (await self.cdp.send_raw(
+                            "Target.createTarget", {"url": "about:blank", "background": True}
+                        ))["targetId"]
                         self.dedicated_target_id = tid
                         log(f"named daemon {NAME}: created dedicated tab ({tid})")
                         page = {"targetId": tid, "url": "about:blank", "type": "page"}
@@ -422,7 +424,9 @@ class Daemon:
                 take_over = inspect_tabs[0]["targetId"]
         if not pages:
             # No usable pages - create one instead of attaching to omnibox popup.
-            tid = (await self.cdp.send_raw("Target.createTarget", {"url": "about:blank"}))["targetId"]
+            tid = (await self.cdp.send_raw(
+                "Target.createTarget", {"url": "about:blank", "background": True}
+            ))["targetId"]
             log(f"no real pages found, created about:blank ({tid})")
             pages = [{"targetId": tid, "url": "about:blank", "type": "page"}]
         self.session = (await self.cdp.send_raw(
@@ -609,10 +613,24 @@ class Daemon:
             return {"result": await self.cdp.send_raw(method, params, session_id=sid)}
         except Exception as e:
             msg = str(e)
-            if "Session with given id not found" in msg and sid == self.session and sid:
-                log(f"stale session {sid}, re-attaching")
-                if await self.attach_first_page():
-                    return {"result": await self.cdp.send_raw(method, params, session_id=self.session)}
+            if "Session with given id not found" in msg and sid:
+                # Explicit session callers asked for that exact session; do not
+                # silently redirect them to the daemon's current tab.
+                if req.get("session_id"):
+                    return {"error": msg}
+                if sid == self.session:
+                    log(f"stale session {sid}, re-attaching")
+                    if not await self.attach_first_page():
+                        return {"error": msg}
+                # Another in-flight request may already have recovered while
+                # this request was waiting for its stale-session response.
+                if self.session and sid != self.session:
+                    try:
+                        return {"result": await self.cdp.send_raw(
+                            method, params, session_id=self.session
+                        )}
+                    except Exception as retry_error:
+                        return {"error": str(retry_error)}
             return {"error": msg}
 
 
