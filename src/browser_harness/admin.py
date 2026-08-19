@@ -469,6 +469,7 @@ def _persist_remote_browser_id(name, browser_id):
         raise RuntimeError("Browser Use Cloud returned an invalid browser id")
     state_path = ipc.remote_id_path(name)
     pending_path = state_path.with_name(state_path.name + ".pending")
+    pending_durable = False
     try:
         fd = os.open(pending_path, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600)
         with os.fdopen(fd, "w", encoding="utf-8") as state_file:
@@ -477,13 +478,18 @@ def _persist_remote_browser_id(name, browser_id):
             os.fsync(state_file.fileno())
         if sys.platform != "win32":
             os.chmod(pending_path, 0o600)
+        _fsync_directory(state_path.parent)
+        pending_durable = True
         os.replace(pending_path, state_path)
         _fsync_directory(state_path.parent)
-    finally:
-        try:
-            pending_path.unlink()
-        except FileNotFoundError:
-            pass
+    except BaseException:
+        if not pending_durable:
+            try:
+                pending_path.unlink()
+                _fsync_directory(state_path.parent)
+            except FileNotFoundError:
+                pass
+        raise
 
 
 def _encode_remote_browser_id(browser_id):

@@ -151,6 +151,49 @@ def test_remote_start_retries_cleanup_and_preserves_both_failures(monkeypatch, t
     assert admin._read_remote_browser_id("scoped") == "browser-1"
 
 
+def test_remote_start_retains_complete_pending_record_when_promotion_and_cleanup_fail(
+    monkeypatch, tmp_path
+):
+    state_path = tmp_path / "remote-id"
+    pending_path = tmp_path / "remote-id.pending"
+    attempts = []
+    real_replace = admin.os.replace
+    monkeypatch.setattr(admin, "daemon_alive", lambda _name: False)
+    monkeypatch.setattr(
+        admin,
+        "_browser_use",
+        lambda path, method, body=None: (
+            {"id": "browser-1", "cdpUrl": "https://cdp.example.test"}
+            if method == "POST"
+            else attempts.append((path, method, body))
+            or (_ for _ in ()).throw(OSError("billing stop failed"))
+        ),
+    )
+    monkeypatch.setattr(admin.time, "sleep", lambda _seconds: None)
+    monkeypatch.setattr(admin.ipc, "remote_id_path", lambda _name: state_path)
+    monkeypatch.setattr(
+        admin.os,
+        "replace",
+        lambda _source, _destination: (_ for _ in ()).throw(OSError("rename failed")),
+    )
+
+    with pytest.raises(BaseExceptionGroup) as exc_info:
+        admin.start_remote_daemon("scoped")
+
+    assert [str(error) for error in exc_info.value.exceptions] == [
+        "rename failed",
+        "failed to stop remote browser browser-1: billing stop failed",
+    ]
+    assert len(attempts) == 3
+    assert pending_path.read_text() == admin._encode_remote_browser_id("browser-1")
+    assert not state_path.exists()
+
+    monkeypatch.setattr(admin.os, "replace", real_replace)
+    assert admin._read_remote_browser_id("scoped") == "browser-1"
+    assert state_path.read_text() == admin._encode_remote_browser_id("browser-1")
+    assert not pending_path.exists()
+
+
 def test_dead_remote_daemon_stops_persisted_cloud_browser(monkeypatch, tmp_path):
     state_path = tmp_path / "remote-id"
     write_remote_id(state_path, "browser-1")
