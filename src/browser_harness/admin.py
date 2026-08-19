@@ -512,16 +512,33 @@ def stop_remote_daemon(name="remote"):
     # restarts anything on its own; a follow-up `browser-harness`
     # call would auto-spawn a fresh one via ensure_daemon(). That
     # "run-it-again-to-restart" workflow is why it was named that way.
-    browser_id = _read_remote_browser_id(name)
     if daemon_alive(name):
-        restart_daemon(name, require_clean=True)
-    elif browser_id:
+        try:
+            restart_daemon(name, require_clean=True)
+        except Exception as daemon_error:
+            # The daemon can die after the health probe or during the shutdown
+            # response. Recover through the durable cloud id instead of treating
+            # a missing/EOF response as proof that billing stopped.
+            browser_id = _read_remote_browser_id(name)
+            if not browser_id:
+                raise
+            try:
+                _stop_cloud_browser(browser_id, strict=True)
+                restart_daemon(name)
+            except Exception as fallback_error:
+                raise ExceptionGroup(
+                    "daemon shutdown and direct cloud browser cleanup both failed",
+                    [daemon_error, fallback_error],
+                )
+        _clear_remote_browser_id(name)
+        return
+
+    browser_id = _read_remote_browser_id(name)
+    if browser_id:
         # The daemon may have crashed or been SIGKILLed. Its environment is
         # gone, so use the private runtime state to stop the exact cloud browser.
         _stop_cloud_browser(browser_id, strict=True)
-        restart_daemon(name)
-    else:
-        restart_daemon(name, require_clean=True)
+    restart_daemon(name)
     _clear_remote_browser_id(name)
 
 
@@ -552,6 +569,8 @@ def restart_daemon(name=None, require_clean=False):
     #     while the process stayed alive.
     daemon_pid = ipc.identify(name, timeout=5.0)
     daemon_alive = daemon_pid is not None or ipc.ping(name, timeout=1.0)
+    if require_clean and not daemon_alive:
+        raise RuntimeError(f"daemon {name!r} is unavailable for required clean shutdown")
     # Snapshot the daemon's process start-time as a secondary identity check.
     # The IPC socket can disappear before the process exits (e.g. the shutdown
     # path tears down the socket and then waits on a slow remote `stop` PATCH),
@@ -566,8 +585,9 @@ def restart_daemon(name=None, require_clean=False):
         try:
             c, token = ipc.connect(name, timeout=50.0 if require_clean else 5.0)
             response = ipc.request(c, token, {"meta": "shutdown"})
-            if require_clean and isinstance(response, dict) and response.get("error"):
-                raise RuntimeError(response["error"])
+            if require_clean and (not isinstance(response, dict) or response.get("ok") is not True):
+                error = response.get("error") if isinstance(response, dict) else None
+                raise RuntimeError(error or f"daemon {name!r} did not confirm clean shutdown")
         except Exception:
             if require_clean:
                 raise

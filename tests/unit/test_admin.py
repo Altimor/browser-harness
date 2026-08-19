@@ -55,6 +55,65 @@ def test_strict_remote_stop_propagates_daemon_error(monkeypatch):
     assert sock.closed is True
 
 
+def test_restart_daemon_require_clean_rejects_missing_daemon(monkeypatch):
+    monkeypatch.setattr(admin.ipc, "identify", lambda _name, timeout: None)
+    monkeypatch.setattr(admin.ipc, "ping", lambda _name, timeout: False)
+
+    with pytest.raises(RuntimeError, match="unavailable for required clean shutdown"):
+        admin.restart_daemon("scoped", require_clean=True)
+
+
+def test_restart_daemon_require_clean_rejects_eof_response(monkeypatch):
+    sock = FakeSocket(response=b"")
+    monkeypatch.setattr(admin.ipc, "identify", lambda _name, timeout: None)
+    monkeypatch.setattr(admin.ipc, "ping", lambda _name, timeout: True)
+    monkeypatch.setattr(admin.ipc, "connect", lambda _name, timeout: (sock, None))
+
+    with pytest.raises(RuntimeError, match="did not confirm clean shutdown"):
+        admin.restart_daemon("scoped", require_clean=True)
+
+    assert sock.closed is True
+
+
+def test_remote_stop_falls_back_when_daemon_dies_after_outer_probe(monkeypatch, tmp_path):
+    state_path = tmp_path / "remote-id"
+    state_path.write_text("browser-1\n")
+    restarts = []
+    stopped = []
+    monkeypatch.setattr(admin.ipc, "remote_id_path", lambda _name: state_path)
+    monkeypatch.setattr(admin, "daemon_alive", lambda _name: True)
+
+    def fake_restart(name, require_clean=False):
+        restarts.append((name, require_clean))
+        if require_clean:
+            raise RuntimeError("daemon vanished")
+
+    monkeypatch.setattr(admin, "restart_daemon", fake_restart)
+    monkeypatch.setattr(
+        admin,
+        "_stop_cloud_browser",
+        lambda browser_id, strict=False: stopped.append((browser_id, strict)) or True,
+    )
+
+    admin.stop_remote_daemon("scoped")
+
+    assert restarts == [("scoped", True), ("scoped", False)]
+    assert stopped == [("browser-1", True)]
+    assert not state_path.exists()
+
+
+def test_remote_stop_ignores_corrupt_recovery_state_after_live_clean_shutdown(monkeypatch, tmp_path):
+    state_path = tmp_path / "remote-id"
+    state_path.write_text("not a valid cloud id!\n")
+    monkeypatch.setattr(admin.ipc, "remote_id_path", lambda _name: state_path)
+    monkeypatch.setattr(admin, "daemon_alive", lambda _name: True)
+    monkeypatch.setattr(admin, "restart_daemon", lambda _name, require_clean=False: None)
+
+    admin.stop_remote_daemon("scoped")
+
+    assert not state_path.exists()
+
+
 def test_remote_start_retries_cleanup_and_preserves_both_failures(monkeypatch, tmp_path):
     attempts = []
     monkeypatch.setattr(admin, "daemon_alive", lambda _name: False)
