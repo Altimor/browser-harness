@@ -375,8 +375,10 @@ def _run(args):
     # or BU_CDP_WS also blocks the spawn so we honour the precedence install.md promises.
     cloud_admin = code.lstrip().startswith(("start_remote_daemon(", "stop_remote_daemon("))
     if not cloud_admin:
+        require_existing = os.environ.get("BH_REQUIRE_EXISTING_DAEMON") == "1"
         if (
-            not daemon_alive()
+            not require_existing
+            and not daemon_alive()
             and not _local_chrome_listening()
             and not _explicit_cdp_configured()
             and _cloud_auth_configured()
@@ -384,7 +386,7 @@ def _run(args):
         ):
             start_remote_daemon(NAME)
         try:
-            if os.environ.get("BH_REQUIRE_EXISTING_DAEMON") == "1":
+            if require_existing:
                 require_existing_daemon()
             else:
                 ensure_daemon()

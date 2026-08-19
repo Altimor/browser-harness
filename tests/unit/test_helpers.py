@@ -1,3 +1,4 @@
+import base64
 import os
 import tempfile
 import time
@@ -6,7 +7,7 @@ from unittest.mock import patch
 import pytest
 from PIL import Image
 
-from browser_harness import helpers
+from browser_harness import helpers, recorder
 
 
 def _run(fake_png, width, height, **kwargs):
@@ -71,6 +72,18 @@ def test_screenshot_timeout_has_context(tmp_path):
     with patch("browser_harness.helpers._send", side_effect=helpers._IPCResponseTimeout):
         with pytest.raises(RuntimeError, match="Page.captureScreenshot timed out after 60s"):
             helpers.capture_screenshot(str(tmp_path / "shot.png"))
+
+
+def test_recorder_screenshot_uses_long_response_timeout(tmp_path):
+    with patch("browser_harness.helpers.js", return_value={}), patch(
+        "browser_harness.helpers.cdp",
+        return_value={"data": base64.b64encode(b"jpeg").decode()},
+    ) as cdp:
+        recorder._capture(tmp_path, "click")
+
+    screenshot = next(call for call in cdp.call_args_list if call.args == ("Page.captureScreenshot",))
+    assert screenshot.kwargs["_response_timeout"] == helpers.SCREENSHOT_IPC_RESPONSE_TIMEOUT_SECONDS
+    assert screenshot.kwargs["format"] == "jpeg"
 
 
 def _seed_skill(tmp_path):

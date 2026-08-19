@@ -56,6 +56,17 @@ def test_shutdown_keeps_daemon_alive_when_cloud_stop_fails(monkeypatch):
     assert d.stop.is_set() is False
 
 
+def test_cloud_ping_reports_exact_remote_browser_id(monkeypatch):
+    d = daemon.Daemon()
+    monkeypatch.setattr(daemon, "BROWSER_KIND", "cloud")
+    monkeypatch.setattr(daemon, "REMOTE_ID", "browser-1")
+
+    response = asyncio.run(d.handle({"meta": "ping"}))
+
+    assert response["browser_kind"] == "cloud"
+    assert response["remote_browser_id"] == "browser-1"
+
+
 class _FakeCDP:
     """Records send_raw calls so tests can assert which CDP methods fired."""
 

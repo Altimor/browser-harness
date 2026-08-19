@@ -580,7 +580,15 @@ class Daemon:
         # daemon and not an unrelated process that reused our port post-crash.
         # `pid` lets restart_daemon() verify the live daemon's identity before
         # signaling — protects against SIGTERM-by-stale-pid-file after PID reuse.
-        if meta == "ping":        return {"pong": True, "pid": os.getpid(), "browser_kind": BROWSER_KIND}
+        # The cloud id lets admin compare durable recovery state with the exact
+        # resource this daemon owns before clearing either one.
+        if meta == "ping":
+            return {
+                "pong": True,
+                "pid": os.getpid(),
+                "browser_kind": BROWSER_KIND,
+                **({"remote_browser_id": REMOTE_ID} if REMOTE_ID else {}),
+            }
         if meta == "drain_events":
             out = list(self.events); self.events.clear()
             return {"events": out}

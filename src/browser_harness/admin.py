@@ -1,3 +1,4 @@
+import errno
 import hashlib
 import json
 import os
@@ -7,11 +8,11 @@ import subprocess
 import sys
 import time
 import urllib.request
+from contextlib import contextmanager
 from pathlib import Path
 
 from . import _ipc as ipc
-from . import auth
-from . import paths
+from . import auth, paths
 
 
 def _process_start_time(pid):
@@ -187,22 +188,31 @@ def daemon_alive(name=None):
     return ipc.ping(name or NAME, timeout=1.0)
 
 
-def daemon_browser_kind(name=None):
-    """'cloud' | 'cdp' | 'local' as self-reported by a live daemon, else None.
-
-    None covers unreachable daemons and pre-browser_kind daemons still running
-    from an older version."""
+def _daemon_browser_identity(name=None):
+    """Return a live daemon's browser kind and exact cloud id when available."""
     c = None
     try:
         c, token = ipc.connect(name or NAME, timeout=1.0)
         response = ipc.request(c, token, {"meta": "ping"})
         kind = response.get("browser_kind") if isinstance(response, dict) else None
-        return kind if kind in {"cloud", "cdp", "local"} else None
-    except (FileNotFoundError, ConnectionRefusedError, TimeoutError, socket.timeout, OSError, ValueError):
-        return None
+        kind = kind if kind in {"cloud", "cdp", "local"} else None
+        browser_id = response.get("remote_browser_id") if isinstance(response, dict) else None
+        if not isinstance(browser_id, str) or not re.fullmatch(r"[A-Za-z0-9_-]{1,256}", browser_id):
+            browser_id = None
+        return kind, browser_id if kind == "cloud" else None
+    except (FileNotFoundError, ConnectionRefusedError, TimeoutError, OSError, ValueError):
+        return None, None
     finally:
         if c:
             c.close()
+
+
+def daemon_browser_kind(name=None):
+    """'cloud' | 'cdp' | 'local' as self-reported by a live daemon, else None.
+
+    None covers unreachable daemons and pre-browser_kind daemons still running
+    from an older version."""
+    return _daemon_browser_identity(name)[0]
 
 
 def _daemon_endpoint_names():
@@ -341,6 +351,13 @@ def run_doctor_fix_snap():
 def ensure_daemon(wait=60.0, name=None, env=None):
     """Idempotent. Self-heals stale daemon, closed Chrome (launches it), cold
     Chrome, and missing Allow on chrome://inspect."""
+    daemon_name = name or NAME
+    with _remote_daemon_lifecycle_lock(daemon_name):
+        return _ensure_daemon_locked(wait=wait, name=daemon_name, env=env)
+
+
+def _ensure_daemon_locked(wait=60.0, name=None, env=None):
+    """ensure_daemon() implementation while the per-name lifecycle lock is held."""
     if daemon_alive(name):
         # Stale daemons accept connects AND reply to meta:* (pure Python) even when the
         # CDP WS to Chrome is dead — probe with a real CDP call and require "result".
@@ -354,7 +371,16 @@ def ensure_daemon(wait=60.0, name=None, env=None):
             except Exception:
                 pass
             if not last: time.sleep(0.5)
-        restart_daemon(name)
+        daemon_name = name or NAME
+        daemon_kind = daemon_browser_kind(daemon_name)
+        has_remote_recovery = _read_remote_browser_id(daemon_name) is not None
+        if daemon_kind == "cloud" or has_remote_recovery:
+            # A cloud daemon that cannot answer CDP may still own a billable
+            # browser. Use the durable cleanup path before replacing it; if
+            # both daemon and direct Cloud stop fail, leave it alive.
+            _stop_remote_daemon_locked(daemon_name)
+        else:
+            restart_daemon(daemon_name)
 
     import subprocess, sys
     local = _is_local_chrome_mode(env)
@@ -469,25 +495,25 @@ def _persist_remote_browser_id(name, browser_id):
         raise RuntimeError("Browser Use Cloud returned an invalid browser id")
     state_path = ipc.remote_id_path(name)
     pending_path = state_path.with_name(state_path.name + ".pending")
-    pending_durable = False
+    pending_complete = False
     try:
         fd = os.open(pending_path, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600)
         with os.fdopen(fd, "w", encoding="utf-8") as state_file:
             state_file.write(_encode_remote_browser_id(browser_id))
             state_file.flush()
             os.fsync(state_file.fileno())
+        pending_complete = True
         if sys.platform != "win32":
             os.chmod(pending_path, 0o600)
         _fsync_directory(state_path.parent)
-        pending_durable = True
         os.replace(pending_path, state_path)
         _fsync_directory(state_path.parent)
     except BaseException:
-        if not pending_durable:
+        if not pending_complete:
             try:
                 pending_path.unlink()
                 _fsync_directory(state_path.parent)
-            except FileNotFoundError:
+            except BaseException:
                 pass
         raise
 
@@ -557,35 +583,106 @@ def _fsync_directory(directory):
         os.close(fd)
 
 
+@contextmanager
+def _remote_daemon_lifecycle_lock(name):
+    """Serialize provisioning and cleanup for one daemon across processes."""
+    state_path = ipc.remote_id_path(name)
+    lock_path = state_path.with_name(state_path.name + ".lock")
+    fd = os.open(lock_path, os.O_RDWR | os.O_CREAT, 0o600)
+    locked = False
+    try:
+        if sys.platform == "win32":
+            import msvcrt
+
+            if os.fstat(fd).st_size == 0:
+                os.write(fd, b"\0")
+            while True:
+                os.lseek(fd, 0, os.SEEK_SET)
+                try:
+                    msvcrt.locking(fd, msvcrt.LK_NBLCK, 1)
+                    break
+                except OSError as exc:
+                    if exc.errno not in {errno.EACCES, errno.EAGAIN, errno.EDEADLK}:
+                        raise
+                    time.sleep(0.05)
+        else:
+            import fcntl
+
+            fcntl.flock(fd, fcntl.LOCK_EX)
+        locked = True
+        yield
+    finally:
+        if locked:
+            if sys.platform == "win32":
+                import msvcrt
+
+                os.lseek(fd, 0, os.SEEK_SET)
+                msvcrt.locking(fd, msvcrt.LK_UNLCK, 1)
+            else:
+                import fcntl
+
+                fcntl.flock(fd, fcntl.LOCK_UN)
+        os.close(fd)
+
+
 def stop_remote_daemon(name="remote"):
     """Stop a remote daemon and its backing Browser Use cloud browser.
 
     Triggers the daemon's clean shutdown, which PATCHes
     /browsers/{id} {"action":"stop"} so billing ends and any profile
     state in the session is persisted."""
+    with _remote_daemon_lifecycle_lock(name):
+        return _stop_remote_daemon_locked(name)
+
+
+def _stop_remote_daemon_locked(name):
     # restart_daemon is misnamed — it only stops the daemon (sends
     # shutdown, SIGTERMs if needed, unlinks socket+pid). It never
     # restarts anything on its own; a follow-up `browser-harness`
     # call would auto-spawn a fresh one via ensure_daemon(). That
     # "run-it-again-to-restart" workflow is why it was named that way.
     if daemon_alive(name):
+        daemon_kind, daemon_browser_id = _daemon_browser_identity(name)
+        try:
+            persisted_browser_id = _read_remote_browser_id(name)
+        except RuntimeError:
+            # Preserve the established behavior for corrupt legacy state after
+            # a live daemon confirms a clean shutdown. There is no validated id
+            # that can be sent to Cloud safely.
+            persisted_browser_id = None
+        daemon_owns_persisted_browser = (
+            daemon_kind == "cloud"
+            and daemon_browser_id is not None
+            and daemon_browser_id == persisted_browser_id
+        )
         try:
             restart_daemon(name, require_clean=True)
         except Exception as daemon_error:
             # The daemon can die after the health probe or during the shutdown
             # response. Recover through the durable cloud id instead of treating
             # a missing/EOF response as proof that billing stopped.
-            browser_id = _read_remote_browser_id(name)
-            if not browser_id:
+            cleanup_ids = []
+            if daemon_kind == "cloud" and daemon_browser_id:
+                cleanup_ids.append(daemon_browser_id)
+            if persisted_browser_id and persisted_browser_id not in cleanup_ids:
+                cleanup_ids.append(persisted_browser_id)
+            if not cleanup_ids:
                 raise
             try:
-                _stop_cloud_browser(browser_id, strict=True)
+                for browser_id in cleanup_ids:
+                    _stop_cloud_browser(browser_id, strict=True)
                 restart_daemon(name)
             except Exception as fallback_error:
                 raise ExceptionGroup(
-                    "daemon shutdown and direct cloud browser cleanup both failed",
+                    "daemon shutdown and fallback cloud-browser recovery both failed",
                     [daemon_error, fallback_error],
                 )
+        else:
+            # A same-name local/CDP daemon, an older daemon without identity,
+            # or a cloud daemon for another id cannot own this recovery record.
+            # Stop the exact persisted resource before clearing its only handle.
+            if persisted_browser_id and not daemon_owns_persisted_browser:
+                _stop_cloud_browser(persisted_browser_id, strict=True)
         _clear_remote_browser_id(name)
         return
 
@@ -798,6 +895,13 @@ def start_remote_daemon(name="remote", profileName=None, **create_kwargs):
 
     Returns the full browser dict including `liveUrl`. Prints the liveUrl and
     auto-opens it locally when a GUI is detected, so the user can watch along."""
+    with _remote_daemon_lifecycle_lock(name):
+        browser = _start_remote_daemon_locked(name, profileName=profileName, **create_kwargs)
+    _show_live_url(browser.get("liveUrl"))
+    return browser
+
+
+def _start_remote_daemon_locked(name, profileName=None, **create_kwargs):
     if daemon_alive(name):
         raise RuntimeError(f"daemon {name!r} already alive -- restart_daemon({name!r}) first")
     if _read_remote_browser_id(name):
@@ -814,7 +918,7 @@ def start_remote_daemon(name="remote", profileName=None, **create_kwargs):
         # persistence in the same rollback boundary: a full disk or permission
         # error must stop the browser we just created instead of orphaning it.
         _persist_remote_browser_id(name, browser.get("id"))
-        ensure_daemon(
+        _ensure_daemon_locked(
             name=name,
             env={"BU_CDP_WS": _cdp_ws_from_url(browser["cdpUrl"]), "BU_BROWSER_ID": browser["id"]},
         )
@@ -828,7 +932,6 @@ def start_remote_daemon(name="remote", profileName=None, **create_kwargs):
             )
         _clear_remote_browser_id(name)
         raise
-    _show_live_url(browser.get("liveUrl"))
     return browser
 
 

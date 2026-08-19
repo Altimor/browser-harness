@@ -273,7 +273,12 @@ def _capture(d, helper, args=(), kwargs=None, duration=None):
         if k in event:
             event[k] = _scrub_url(event[k])
     try:
-        shot = helpers.cdp("Page.captureScreenshot", format="jpeg", quality=80)
+        shot = helpers.cdp(
+            "Page.captureScreenshot",
+            _response_timeout=helpers.SCREENSHOT_IPC_RESPONSE_TIMEOUT_SECONDS,
+            format="jpeg",
+            quality=80,
+        )
         number = sum(1 for _ in d.glob("*.jpg")) + 1
         data = base64.b64decode(shot["data"])
         while True:
