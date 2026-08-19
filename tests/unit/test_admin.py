@@ -172,6 +172,17 @@ def test_dead_remote_daemon_stops_persisted_cloud_browser(monkeypatch, tmp_path)
     assert not state_path.exists()
 
 
+def test_remote_browser_recovery_promotes_valid_pending_state(monkeypatch, tmp_path):
+    state_path = tmp_path / "remote-id"
+    pending_path = tmp_path / "remote-id.pending"
+    pending_path.write_text("browser-1\n")
+    monkeypatch.setattr(admin.ipc, "remote_id_path", lambda _name: state_path)
+
+    assert admin._read_remote_browser_id("scoped") == "browser-1"
+    assert state_path.read_text().strip() == "browser-1"
+    assert not pending_path.exists()
+
+
 def test_dead_remote_daemon_retains_recovery_state_when_stop_fails(monkeypatch, tmp_path):
     state_path = tmp_path / "remote-id"
     state_path.write_text("browser-1\n")

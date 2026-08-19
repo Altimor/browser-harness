@@ -477,6 +477,7 @@ def _persist_remote_browser_id(name, browser_id):
         if sys.platform != "win32":
             os.chmod(pending_path, 0o600)
         os.replace(pending_path, state_path)
+        _fsync_directory(state_path.parent)
     finally:
         try:
             pending_path.unlink()
@@ -485,20 +486,48 @@ def _persist_remote_browser_id(name, browser_id):
 
 
 def _read_remote_browser_id(name):
+    state_path = ipc.remote_id_path(name)
     try:
-        browser_id = ipc.remote_id_path(name).read_text(encoding="utf-8").strip()
-    except (FileNotFoundError, OSError):
-        return None
+        browser_id = state_path.read_text(encoding="utf-8").strip()
+    except FileNotFoundError:
+        pending_path = state_path.with_name(state_path.name + ".pending")
+        try:
+            browser_id = pending_path.read_text(encoding="utf-8").strip()
+        except FileNotFoundError:
+            return None
+        if not re.fullmatch(r"[A-Za-z0-9_-]{1,256}", browser_id):
+            raise RuntimeError(f"invalid pending remote browser recovery state for daemon {name!r}")
+        os.replace(pending_path, state_path)
+        _fsync_directory(state_path.parent)
+        return browser_id
     if not re.fullmatch(r"[A-Za-z0-9_-]{1,256}", browser_id):
         raise RuntimeError(f"invalid remote browser recovery state for daemon {name!r}")
     return browser_id
 
 
 def _clear_remote_browser_id(name):
+    state_path = ipc.remote_id_path(name)
+    removed = False
+    for candidate in (state_path, state_path.with_name(state_path.name + ".pending")):
+        try:
+            candidate.unlink()
+            removed = True
+        except FileNotFoundError:
+            pass
+    if removed:
+        _fsync_directory(state_path.parent)
+
+
+def _fsync_directory(directory):
+    """Persist a recovery-state rename/unlink across a host crash on POSIX."""
+    if sys.platform == "win32":
+        return
+    flags = os.O_RDONLY | getattr(os, "O_DIRECTORY", 0)
+    fd = os.open(directory, flags)
     try:
-        ipc.remote_id_path(name).unlink()
-    except FileNotFoundError:
-        pass
+        os.fsync(fd)
+    finally:
+        os.close(fd)
 
 
 def stop_remote_daemon(name="remote"):
