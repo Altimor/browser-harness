@@ -463,6 +463,44 @@ def require_existing_daemon(name=None):
         raise RuntimeError(f"required daemon {daemon_name!r} failed its CDP health check")
 
 
+def _persist_remote_browser_id(name, browser_id):
+    if not isinstance(browser_id, str) or not re.fullmatch(r"[A-Za-z0-9_-]{1,256}", browser_id):
+        raise RuntimeError("Browser Use Cloud returned an invalid browser id")
+    state_path = ipc.remote_id_path(name)
+    pending_path = state_path.with_name(state_path.name + ".pending")
+    try:
+        fd = os.open(pending_path, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600)
+        with os.fdopen(fd, "w", encoding="utf-8") as state_file:
+            state_file.write(browser_id + "\n")
+            state_file.flush()
+            os.fsync(state_file.fileno())
+        if sys.platform != "win32":
+            os.chmod(pending_path, 0o600)
+        os.replace(pending_path, state_path)
+    finally:
+        try:
+            pending_path.unlink()
+        except FileNotFoundError:
+            pass
+
+
+def _read_remote_browser_id(name):
+    try:
+        browser_id = ipc.remote_id_path(name).read_text(encoding="utf-8").strip()
+    except (FileNotFoundError, OSError):
+        return None
+    if not re.fullmatch(r"[A-Za-z0-9_-]{1,256}", browser_id):
+        raise RuntimeError(f"invalid remote browser recovery state for daemon {name!r}")
+    return browser_id
+
+
+def _clear_remote_browser_id(name):
+    try:
+        ipc.remote_id_path(name).unlink()
+    except FileNotFoundError:
+        pass
+
+
 def stop_remote_daemon(name="remote"):
     """Stop a remote daemon and its backing Browser Use cloud browser.
 
@@ -474,7 +512,17 @@ def stop_remote_daemon(name="remote"):
     # restarts anything on its own; a follow-up `browser-harness`
     # call would auto-spawn a fresh one via ensure_daemon(). That
     # "run-it-again-to-restart" workflow is why it was named that way.
-    restart_daemon(name, require_clean=True)
+    browser_id = _read_remote_browser_id(name)
+    if daemon_alive(name):
+        restart_daemon(name, require_clean=True)
+    elif browser_id:
+        # The daemon may have crashed or been SIGKILLed. Its environment is
+        # gone, so use the private runtime state to stop the exact cloud browser.
+        _stop_cloud_browser(browser_id, strict=True)
+        restart_daemon(name)
+    else:
+        restart_daemon(name, require_clean=True)
+    _clear_remote_browser_id(name)
 
 
 def restart_daemon(name=None, require_clean=False):
@@ -676,12 +724,20 @@ def start_remote_daemon(name="remote", profileName=None, **create_kwargs):
     auto-opens it locally when a GUI is detected, so the user can watch along."""
     if daemon_alive(name):
         raise RuntimeError(f"daemon {name!r} already alive -- restart_daemon({name!r}) first")
+    if _read_remote_browser_id(name):
+        raise RuntimeError(
+            f"remote browser cleanup is still pending for daemon {name!r} -- call stop_remote_daemon({name!r}) first"
+        )
     if profileName:
         if "profileId" in create_kwargs:
             raise RuntimeError("pass profileName OR profileId, not both")
         create_kwargs["profileId"] = _resolve_profile_name(profileName)
     browser = _browser_use("/browsers", "POST", create_kwargs)
     try:
+        # Persist the exact billable resource before starting the daemon. Keep
+        # persistence in the same rollback boundary: a full disk or permission
+        # error must stop the browser we just created instead of orphaning it.
+        _persist_remote_browser_id(name, browser.get("id"))
         ensure_daemon(
             name=name,
             env={"BU_CDP_WS": _cdp_ws_from_url(browser["cdpUrl"]), "BU_BROWSER_ID": browser["id"]},
@@ -694,6 +750,7 @@ def start_remote_daemon(name="remote", profileName=None, **create_kwargs):
                 "remote daemon startup and cloud browser cleanup both failed",
                 [start_error, cleanup_error],
             )
+        _clear_remote_browser_id(name)
         raise
     _show_live_url(browser.get("liveUrl"))
     return browser

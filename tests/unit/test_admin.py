@@ -44,6 +44,7 @@ def test_require_existing_daemon_probes_cdp(monkeypatch):
 
 def test_strict_remote_stop_propagates_daemon_error(monkeypatch):
     sock = FakeSocket(response=b'{"error":"billing stop failed"}\n')
+    monkeypatch.setattr(admin, "daemon_alive", lambda _name: True)
     monkeypatch.setattr(admin.ipc, "identify", lambda _name, timeout: 123)
     monkeypatch.setattr(admin, "_process_start_time", lambda _pid: 1)
     monkeypatch.setattr(admin.ipc, "connect", lambda _name, timeout: (sock, None))
@@ -54,7 +55,7 @@ def test_strict_remote_stop_propagates_daemon_error(monkeypatch):
     assert sock.closed is True
 
 
-def test_remote_start_retries_cleanup_and_preserves_both_failures(monkeypatch):
+def test_remote_start_retries_cleanup_and_preserves_both_failures(monkeypatch, tmp_path):
     attempts = []
     monkeypatch.setattr(admin, "daemon_alive", lambda _name: False)
     monkeypatch.setattr(
@@ -74,6 +75,7 @@ def test_remote_start_retries_cleanup_and_preserves_both_failures(monkeypatch):
         lambda **_kwargs: (_ for _ in ()).throw(RuntimeError("daemon start failed")),
     )
     monkeypatch.setattr(admin.time, "sleep", lambda _seconds: None)
+    monkeypatch.setattr(admin.ipc, "remote_id_path", lambda _name: tmp_path / "remote-id")
 
     with pytest.raises(BaseExceptionGroup) as exc_info:
         admin.start_remote_daemon("scoped")
@@ -83,6 +85,49 @@ def test_remote_start_retries_cleanup_and_preserves_both_failures(monkeypatch):
         "failed to stop remote browser browser-1: billing stop failed",
     ]
     assert len(attempts) == 3
+    assert (tmp_path / "remote-id").read_text().strip() == "browser-1"
+
+
+def test_dead_remote_daemon_stops_persisted_cloud_browser(monkeypatch, tmp_path):
+    state_path = tmp_path / "remote-id"
+    state_path.write_text("browser-1\n")
+    stopped = []
+    restarted = []
+    monkeypatch.setattr(admin.ipc, "remote_id_path", lambda _name: state_path)
+    monkeypatch.setattr(admin, "daemon_alive", lambda _name: False)
+    monkeypatch.setattr(
+        admin,
+        "_stop_cloud_browser",
+        lambda browser_id, strict=False: stopped.append((browser_id, strict)) or True,
+    )
+    monkeypatch.setattr(
+        admin,
+        "restart_daemon",
+        lambda name, require_clean=False: restarted.append((name, require_clean)),
+    )
+
+    admin.stop_remote_daemon("scoped")
+
+    assert stopped == [("browser-1", True)]
+    assert restarted == [("scoped", False)]
+    assert not state_path.exists()
+
+
+def test_dead_remote_daemon_retains_recovery_state_when_stop_fails(monkeypatch, tmp_path):
+    state_path = tmp_path / "remote-id"
+    state_path.write_text("browser-1\n")
+    monkeypatch.setattr(admin.ipc, "remote_id_path", lambda _name: state_path)
+    monkeypatch.setattr(admin, "daemon_alive", lambda _name: False)
+    monkeypatch.setattr(
+        admin,
+        "_stop_cloud_browser",
+        lambda _browser_id, strict=False: (_ for _ in ()).throw(RuntimeError("stop failed")),
+    )
+
+    with pytest.raises(RuntimeError, match="stop failed"):
+        admin.stop_remote_daemon("scoped")
+
+    assert state_path.read_text().strip() == "browser-1"
 
 
 def test_local_chrome_mode_is_false_when_process_env_provides_remote_cdp(monkeypatch):
@@ -393,7 +438,7 @@ def test_doctor_page_output_truncates_long_text(monkeypatch, capsys):
     assert "https://example.t..." in out
 
 
-def test_start_remote_daemon_stops_created_browser_when_daemon_start_fails(monkeypatch):
+def test_start_remote_daemon_stops_created_browser_when_daemon_start_fails(monkeypatch, tmp_path):
     calls = []
     browser = {"id": "browser-123", "cdpUrl": "http://127.0.0.1:9333", "liveUrl": "https://live.example"}
 
@@ -409,6 +454,7 @@ def test_start_remote_daemon_stops_created_browser_when_daemon_start_fails(monke
     monkeypatch.setattr(admin, "_browser_use", fake_browser_use)
     monkeypatch.setattr(admin, "_cdp_ws_from_url", lambda url: "ws://example.test/devtools/browser/1")
     monkeypatch.setattr(admin, "ensure_daemon", lambda **kwargs: (_ for _ in ()).throw(RuntimeError("boom")))
+    monkeypatch.setattr(admin.ipc, "remote_id_path", lambda _name: tmp_path / "remote-id")
 
     with pytest.raises(RuntimeError, match="boom"):
         admin.start_remote_daemon()
@@ -417,10 +463,46 @@ def test_start_remote_daemon_stops_created_browser_when_daemon_start_fails(monke
         ("/browsers", "POST", {}),
         ("/browsers/browser-123", "PATCH", {"action": "stop"}),
     ]
+    assert not (tmp_path / "remote-id").exists()
+
+
+def test_start_remote_daemon_stops_created_browser_when_recovery_state_cannot_persist(monkeypatch):
+    calls = []
+    browser = {"id": "browser-123", "cdpUrl": "http://127.0.0.1:9333"}
+
+    def fake_browser_use(path, method, body=None):
+        calls.append((path, method, body))
+        if (path, method) == ("/browsers", "POST"):
+            return browser
+        if (path, method) == ("/browsers/browser-123", "PATCH"):
+            return {}
+        raise AssertionError((path, method, body))
+
+    monkeypatch.setattr(admin, "daemon_alive", lambda _name: False)
+    monkeypatch.setattr(admin, "_browser_use", fake_browser_use)
+    monkeypatch.setattr(
+        admin,
+        "_persist_remote_browser_id",
+        lambda *_args: (_ for _ in ()).throw(OSError("disk full")),
+    )
+    monkeypatch.setattr(
+        admin,
+        "ensure_daemon",
+        lambda **_kwargs: pytest.fail("daemon must not start without recovery state"),
+    )
+    monkeypatch.setattr(admin, "_clear_remote_browser_id", lambda _name: None)
+
+    with pytest.raises(OSError, match="disk full"):
+        admin.start_remote_daemon("scoped")
+
+    assert calls == [
+        ("/browsers", "POST", {}),
+        ("/browsers/browser-123", "PATCH", {"action": "stop"}),
+    ]
 
 
 @pytest.mark.parametrize("exc_type", [KeyboardInterrupt, SystemExit])
-def test_start_remote_daemon_stops_created_browser_when_daemon_start_is_interrupted(monkeypatch, exc_type):
+def test_start_remote_daemon_stops_created_browser_when_daemon_start_is_interrupted(monkeypatch, exc_type, tmp_path):
     calls = []
     browser = {"id": "browser-123", "cdpUrl": "http://127.0.0.1:9333", "liveUrl": "https://live.example"}
 
@@ -436,6 +518,7 @@ def test_start_remote_daemon_stops_created_browser_when_daemon_start_is_interrup
     monkeypatch.setattr(admin, "_browser_use", fake_browser_use)
     monkeypatch.setattr(admin, "_cdp_ws_from_url", lambda url: "ws://example.test/devtools/browser/1")
     monkeypatch.setattr(admin, "ensure_daemon", lambda **kwargs: (_ for _ in ()).throw(exc_type()))
+    monkeypatch.setattr(admin.ipc, "remote_id_path", lambda _name: tmp_path / "remote-id")
 
     with pytest.raises(exc_type):
         admin.start_remote_daemon()
@@ -444,6 +527,7 @@ def test_start_remote_daemon_stops_created_browser_when_daemon_start_is_interrup
         ("/browsers", "POST", {}),
         ("/browsers/browser-123", "PATCH", {"action": "stop"}),
     ]
+    assert not (tmp_path / "remote-id").exists()
 
 
 @pytest.mark.parametrize("exc_type", [KeyboardInterrupt, SystemExit])
@@ -452,7 +536,7 @@ def test_stop_cloud_browser_swallows_baseexception_from_stop_request(monkeypatch
 
     admin._stop_cloud_browser("browser-123")
 
-def test_start_remote_daemon_does_not_stop_created_browser_on_success(monkeypatch):
+def test_start_remote_daemon_does_not_stop_created_browser_on_success(monkeypatch, tmp_path):
     calls = []
     browser = {"id": "browser-123", "cdpUrl": "http://127.0.0.1:9333", "liveUrl": "https://live.example"}
 
@@ -467,11 +551,13 @@ def test_start_remote_daemon_does_not_stop_created_browser_on_success(monkeypatc
     monkeypatch.setattr(admin, "_cdp_ws_from_url", lambda url: "ws://example.test/devtools/browser/1")
     monkeypatch.setattr(admin, "ensure_daemon", lambda **kwargs: None)
     monkeypatch.setattr(admin, "_show_live_url", lambda url: None)
+    monkeypatch.setattr(admin.ipc, "remote_id_path", lambda _name: tmp_path / "remote-id")
 
     assert admin.start_remote_daemon() == browser
     assert calls == [
         ("/browsers", "POST", {}),
     ]
+    assert (tmp_path / "remote-id").read_text().strip() == "browser-123"
 
 
 # --- restart_daemon: PID-reuse safety ---
