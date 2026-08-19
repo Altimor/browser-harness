@@ -97,7 +97,7 @@ def test_remote_stop_falls_back_when_daemon_dies_after_outer_probe(monkeypatch, 
         if require_clean:
             raise RuntimeError("daemon vanished")
 
-    monkeypatch.setattr(admin, "restart_daemon", fake_restart)
+    monkeypatch.setattr(admin, "_restart_daemon_locked", fake_restart)
     monkeypatch.setattr(
         admin,
         "_stop_cloud_browser",
@@ -121,7 +121,7 @@ def test_remote_stop_fallback_error_describes_the_whole_recovery_step(monkeypatc
     def restart(_name, require_clean=False):
         raise RuntimeError("clean shutdown failed" if require_clean else "forced cleanup failed")
 
-    monkeypatch.setattr(admin, "restart_daemon", restart)
+    monkeypatch.setattr(admin, "_restart_daemon_locked", restart)
     monkeypatch.setattr(admin, "_stop_cloud_browser", lambda _browser_id, strict=False: True)
 
     with pytest.raises(ExceptionGroup, match="fallback cloud-browser recovery") as exc_info:
@@ -154,7 +154,7 @@ def test_live_daemon_stops_persisted_browser_only_when_it_is_not_the_exact_owner
     monkeypatch.setattr(admin, "_daemon_browser_identity", lambda _name: daemon_identity)
     monkeypatch.setattr(
         admin,
-        "restart_daemon",
+        "_restart_daemon_locked",
         lambda name, require_clean=False: restarts.append((name, require_clean)),
     )
     monkeypatch.setattr(
@@ -175,7 +175,7 @@ def test_remote_stop_ignores_corrupt_recovery_state_after_live_clean_shutdown(mo
     state_path.write_text("not a valid cloud id!\n")
     monkeypatch.setattr(admin.ipc, "remote_id_path", lambda _name: state_path)
     monkeypatch.setattr(admin, "daemon_alive", lambda _name: True)
-    monkeypatch.setattr(admin, "restart_daemon", lambda _name, require_clean=False: None)
+    monkeypatch.setattr(admin, "_restart_daemon_locked", lambda _name, require_clean=False: None)
 
     admin.stop_remote_daemon("scoped")
 
@@ -330,7 +330,7 @@ def test_ensure_daemon_self_heal_uses_durable_cleanup_for_cloud(monkeypatch, tmp
         "_stop_remote_daemon_locked",
         lambda name: stopped.append(name),
     )
-    monkeypatch.setattr(admin, "restart_daemon", lambda _name: pytest.fail("must clean cloud"))
+    monkeypatch.setattr(admin, "_restart_daemon_locked", lambda _name: pytest.fail("must clean cloud"))
     monkeypatch.setattr(admin.ipc, "remote_id_path", lambda _name: tmp_path / "remote-id")
     monkeypatch.setattr(admin.ipc, "log_path", lambda _name: tmp_path / "daemon.log")
     monkeypatch.setattr(admin.subprocess, "Popen", lambda *args, **kwargs: Process())
@@ -356,7 +356,7 @@ def test_dead_remote_daemon_stops_persisted_cloud_browser(monkeypatch, tmp_path)
     )
     monkeypatch.setattr(
         admin,
-        "restart_daemon",
+        "_restart_daemon_locked",
         lambda name, require_clean=False: restarted.append((name, require_clean)),
     )
 
@@ -963,6 +963,108 @@ def test_remote_start_serializes_against_ordinary_ensure(monkeypatch, tmp_path):
     assert spawn_envs[0]["BU_CDP_WS"] == "wss://cdp.example.test/ws"
     assert spawn_envs[0]["BU_BROWSER_ID"] == "browser-1"
     assert admin._read_remote_browser_id("scoped") == "browser-1"
+
+
+def test_reload_serializes_against_remote_provision(monkeypatch, tmp_path):
+    from browser_harness import run
+
+    state_path = tmp_path / "remote-id"
+    cloud_post_entered = threading.Event()
+    release_cloud_post = threading.Event()
+    reload_lock_attempted = threading.Event()
+    daemon_started = threading.Event()
+    restart_observations = []
+    errors = []
+    reload_thread = None
+    real_lifecycle_lock = admin._remote_daemon_lifecycle_lock
+
+    @contextmanager
+    def observed_lifecycle_lock(name):
+        if threading.current_thread() is reload_thread:
+            reload_lock_attempted.set()
+        with real_lifecycle_lock(name):
+            yield
+
+    def browser_use(path, method, body=None):
+        assert (path, method) == ("/browsers", "POST")
+        cloud_post_entered.set()
+        assert release_cloud_post.wait(timeout=2)
+        return {"id": "browser-1", "cdpUrl": "https://cdp.example.test"}
+
+    monkeypatch.setattr(admin.ipc, "remote_id_path", lambda _name: state_path)
+    monkeypatch.setattr(admin, "_remote_daemon_lifecycle_lock", observed_lifecycle_lock)
+    monkeypatch.setattr(admin, "daemon_alive", lambda _name=None: daemon_started.is_set())
+    monkeypatch.setattr(admin, "_browser_use", browser_use)
+    monkeypatch.setattr(admin, "_cdp_ws_from_url", lambda _url: "wss://cdp.example.test/ws")
+    monkeypatch.setattr(admin, "_ensure_daemon_locked", lambda **_kwargs: daemon_started.set())
+    monkeypatch.setattr(admin, "_show_live_url", lambda _url: None)
+    monkeypatch.setattr(
+        admin,
+        "_restart_daemon_locked",
+        lambda name, require_clean=False: restart_observations.append(
+            (name, daemon_started.is_set(), require_clean)
+        ),
+    )
+
+    def start_remote():
+        try:
+            admin.start_remote_daemon(admin.NAME)
+        except BaseException as exc:
+            errors.append(exc)
+
+    def reload():
+        try:
+            # This is the exact imported function used by `browser-harness --reload`.
+            run.restart_daemon()
+        except BaseException as exc:
+            errors.append(exc)
+
+    provision_thread = threading.Thread(target=start_remote, daemon=True)
+    reload_thread = threading.Thread(target=reload, daemon=True)
+    provision_thread.start()
+    assert cloud_post_entered.wait(timeout=2)
+    reload_thread.start()
+    assert reload_lock_attempted.wait(timeout=2)
+    assert restart_observations == []
+    release_cloud_post.set()
+    provision_thread.join(timeout=2)
+    reload_thread.join(timeout=2)
+
+    assert not provision_thread.is_alive() and not reload_thread.is_alive()
+    assert errors == []
+    assert restart_observations == [(admin.NAME, True, False)]
+
+
+def test_remote_stop_uses_locked_restart_without_reacquiring_lifecycle_lock(monkeypatch):
+    active = False
+    lock_entries = []
+    restart_calls = []
+
+    @contextmanager
+    def non_reentrant_lifecycle_lock(name):
+        nonlocal active
+        assert not active, "already-locked callers must use _restart_daemon_locked"
+        active = True
+        lock_entries.append(name)
+        try:
+            yield
+        finally:
+            active = False
+
+    monkeypatch.setattr(admin, "_remote_daemon_lifecycle_lock", non_reentrant_lifecycle_lock)
+    monkeypatch.setattr(admin, "daemon_alive", lambda _name: False)
+    monkeypatch.setattr(admin, "_read_remote_browser_id", lambda _name: None)
+    monkeypatch.setattr(admin, "_clear_remote_browser_id", lambda _name: None)
+    monkeypatch.setattr(
+        admin,
+        "_restart_daemon_locked",
+        lambda name, require_clean=False: restart_calls.append((name, require_clean)),
+    )
+
+    admin.stop_remote_daemon("scoped")
+
+    assert lock_entries == ["scoped"]
+    assert restart_calls == [("scoped", False)]
 
 
 # --- restart_daemon: PID-reuse safety ---

@@ -380,7 +380,7 @@ def _ensure_daemon_locked(wait=60.0, name=None, env=None):
             # both daemon and direct Cloud stop fail, leave it alive.
             _stop_remote_daemon_locked(daemon_name)
         else:
-            restart_daemon(daemon_name)
+            _restart_daemon_locked(daemon_name)
 
     import subprocess, sys
     local = _is_local_chrome_mode(env)
@@ -418,20 +418,20 @@ def _ensure_daemon_locked(wait=60.0, name=None, env=None):
             time.sleep(0.2)
         msg = _log_tail(name) or ""
         if local and msg.startswith("handshake-wait"):
-            restart_daemon(name)
+            _restart_daemon_locked(name)
             raise RuntimeError(
                 "permission-blocked: Chrome's Allow popup was not clicked in time -- wait for the user to click Allow, then retry."
             )
         if local and _needs_chrome_permission_popup(msg):
             print('browser-harness: Chrome is asking "Allow remote debugging?". Click Allow in Chrome, then retry browser work.', file=sys.stderr)
-            restart_daemon(name)
+            _restart_daemon_locked(name)
             raise RuntimeError(
                 "permission-blocked: wait for the user to click Allow in the Chrome permission popup before retrying."
             )
         if local and not launched_browser and _chrome_not_running(msg):
             # Chrome is closed — launch the browser and retry
             launched_browser = True
-            restart_daemon(name)
+            _restart_daemon_locked(name)
             if not _launch_browser():
                 raise RuntimeError(
                     "chrome-not-running: no supported browser is running and none could be launched -- ask the user to open Chrome, then retry."
@@ -448,11 +448,11 @@ def _ensure_daemon_locked(wait=60.0, name=None, env=None):
             if remote_debugging_user_enabled():
                 # chrome://inspect toggle is already on — connection died
                 print('browser-harness: Chrome is asking "Allow remote debugging?". Click Allow in Chrome, then retry browser work.', file=sys.stderr)
-                restart_daemon(name)
+                _restart_daemon_locked(name)
                 raise RuntimeError(
                     "permission-blocked: wait for the user to click Allow in the Chrome permission popup before retrying."
                 )
-            restart_daemon(name)
+            _restart_daemon_locked(name)
             _open_chrome_inspect_once()
             if remote_debugging_toggle_profiles():
                 # Toggle already ticked from a previous run, but Chrome 144+
@@ -656,7 +656,7 @@ def _stop_remote_daemon_locked(name):
             and daemon_browser_id == persisted_browser_id
         )
         try:
-            restart_daemon(name, require_clean=True)
+            _restart_daemon_locked(name, require_clean=True)
         except Exception as daemon_error:
             # The daemon can die after the health probe or during the shutdown
             # response. Recover through the durable cloud id instead of treating
@@ -671,7 +671,7 @@ def _stop_remote_daemon_locked(name):
             try:
                 for browser_id in cleanup_ids:
                     _stop_cloud_browser(browser_id, strict=True)
-                restart_daemon(name)
+                _restart_daemon_locked(name)
             except Exception as fallback_error:
                 raise ExceptionGroup(
                     "daemon shutdown and fallback cloud-browser recovery both failed",
@@ -691,11 +691,18 @@ def _stop_remote_daemon_locked(name):
         # The daemon may have crashed or been SIGKILLed. Its environment is
         # gone, so use the private runtime state to stop the exact cloud browser.
         _stop_cloud_browser(browser_id, strict=True)
-    restart_daemon(name)
+    _restart_daemon_locked(name)
     _clear_remote_browser_id(name)
 
 
 def restart_daemon(name=None, require_clean=False):
+    """Stop one daemon while serialized with provisioning and recovery."""
+    daemon_name = name or NAME
+    with _remote_daemon_lifecycle_lock(daemon_name):
+        return _restart_daemon_locked(daemon_name, require_clean=require_clean)
+
+
+def _restart_daemon_locked(name, require_clean=False):
     """Best-effort daemon shutdown + socket/pid cleanup.
 
     Name is historical: callers typically follow this with another
@@ -709,7 +716,6 @@ def restart_daemon(name=None, require_clean=False):
     """
     import signal
 
-    name = name or NAME
     pid_path = str(ipc.pid_path(name))
 
     # Two pieces of information are tracked separately:
