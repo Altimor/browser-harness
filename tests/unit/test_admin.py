@@ -3,6 +3,10 @@ import pytest
 from browser_harness import admin
 
 
+def write_remote_id(path, browser_id):
+    path.write_text(admin._encode_remote_browser_id(browser_id))
+
+
 class FakeSocket:
     def __init__(self, response=b'{"target_id":"target-1","session_id":"session-1","page":null}\n'):
         self.response = response
@@ -77,7 +81,7 @@ def test_restart_daemon_require_clean_rejects_eof_response(monkeypatch):
 
 def test_remote_stop_falls_back_when_daemon_dies_after_outer_probe(monkeypatch, tmp_path):
     state_path = tmp_path / "remote-id"
-    state_path.write_text("browser-1\n")
+    write_remote_id(state_path, "browser-1")
     restarts = []
     stopped = []
     monkeypatch.setattr(admin.ipc, "remote_id_path", lambda _name: state_path)
@@ -144,12 +148,12 @@ def test_remote_start_retries_cleanup_and_preserves_both_failures(monkeypatch, t
         "failed to stop remote browser browser-1: billing stop failed",
     ]
     assert len(attempts) == 3
-    assert (tmp_path / "remote-id").read_text().strip() == "browser-1"
+    assert admin._read_remote_browser_id("scoped") == "browser-1"
 
 
 def test_dead_remote_daemon_stops_persisted_cloud_browser(monkeypatch, tmp_path):
     state_path = tmp_path / "remote-id"
-    state_path.write_text("browser-1\n")
+    write_remote_id(state_path, "browser-1")
     stopped = []
     restarted = []
     monkeypatch.setattr(admin.ipc, "remote_id_path", lambda _name: state_path)
@@ -175,17 +179,30 @@ def test_dead_remote_daemon_stops_persisted_cloud_browser(monkeypatch, tmp_path)
 def test_remote_browser_recovery_promotes_valid_pending_state(monkeypatch, tmp_path):
     state_path = tmp_path / "remote-id"
     pending_path = tmp_path / "remote-id.pending"
-    pending_path.write_text("browser-1\n")
+    write_remote_id(pending_path, "browser-1")
     monkeypatch.setattr(admin.ipc, "remote_id_path", lambda _name: state_path)
 
     assert admin._read_remote_browser_id("scoped") == "browser-1"
-    assert state_path.read_text().strip() == "browser-1"
+    assert state_path.read_text() == admin._encode_remote_browser_id("browser-1")
     assert not pending_path.exists()
+
+
+def test_remote_browser_recovery_rejects_truncated_pending_id(monkeypatch, tmp_path):
+    state_path = tmp_path / "remote-id"
+    pending_path = tmp_path / "remote-id.pending"
+    pending_path.write_text("browser-1")
+    monkeypatch.setattr(admin.ipc, "remote_id_path", lambda _name: state_path)
+
+    with pytest.raises(RuntimeError, match="invalid pending remote browser recovery state"):
+        admin._read_remote_browser_id("scoped")
+
+    assert pending_path.read_text() == "browser-1"
+    assert not state_path.exists()
 
 
 def test_dead_remote_daemon_retains_recovery_state_when_stop_fails(monkeypatch, tmp_path):
     state_path = tmp_path / "remote-id"
-    state_path.write_text("browser-1\n")
+    write_remote_id(state_path, "browser-1")
     monkeypatch.setattr(admin.ipc, "remote_id_path", lambda _name: state_path)
     monkeypatch.setattr(admin, "daemon_alive", lambda _name: False)
     monkeypatch.setattr(
@@ -197,7 +214,7 @@ def test_dead_remote_daemon_retains_recovery_state_when_stop_fails(monkeypatch, 
     with pytest.raises(RuntimeError, match="stop failed"):
         admin.stop_remote_daemon("scoped")
 
-    assert state_path.read_text().strip() == "browser-1"
+    assert admin._read_remote_browser_id("scoped") == "browser-1"
 
 
 def test_local_chrome_mode_is_false_when_process_env_provides_remote_cdp(monkeypatch):
@@ -627,7 +644,7 @@ def test_start_remote_daemon_does_not_stop_created_browser_on_success(monkeypatc
     assert calls == [
         ("/browsers", "POST", {}),
     ]
-    assert (tmp_path / "remote-id").read_text().strip() == "browser-123"
+    assert admin._read_remote_browser_id("remote") == "browser-123"
 
 
 # --- restart_daemon: PID-reuse safety ---

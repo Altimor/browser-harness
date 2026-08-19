@@ -1,3 +1,4 @@
+import hashlib
 import json
 import os
 import re
@@ -471,7 +472,7 @@ def _persist_remote_browser_id(name, browser_id):
     try:
         fd = os.open(pending_path, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600)
         with os.fdopen(fd, "w", encoding="utf-8") as state_file:
-            state_file.write(browser_id + "\n")
+            state_file.write(_encode_remote_browser_id(browser_id))
             state_file.flush()
             os.fsync(state_file.fileno())
         if sys.platform != "win32":
@@ -485,24 +486,44 @@ def _persist_remote_browser_id(name, browser_id):
             pass
 
 
+def _encode_remote_browser_id(browser_id):
+    if not isinstance(browser_id, str) or not re.fullmatch(r"[A-Za-z0-9_-]{1,256}", browser_id):
+        raise RuntimeError("Browser Use Cloud returned an invalid browser id")
+    digest = hashlib.sha256(f"browser-harness-remote-id-v1\0{browser_id}".encode()).hexdigest()
+    return json.dumps(
+        {"browser_id": browser_id, "sha256": digest, "version": 1},
+        separators=(",", ":"),
+        sort_keys=True,
+    ) + "\n"
+
+
+def _decode_remote_browser_id(raw, *, name, pending):
+    label = "pending remote browser recovery state" if pending else "remote browser recovery state"
+    try:
+        record = json.loads(raw)
+        browser_id = record["browser_id"]
+    except (json.JSONDecodeError, KeyError, TypeError):
+        raise RuntimeError(f"invalid {label} for daemon {name!r}") from None
+    if raw != _encode_remote_browser_id(browser_id):
+        raise RuntimeError(f"invalid {label} for daemon {name!r}")
+    return browser_id
+
+
 def _read_remote_browser_id(name):
     state_path = ipc.remote_id_path(name)
     try:
-        browser_id = state_path.read_text(encoding="utf-8").strip()
+        raw = state_path.read_text(encoding="utf-8")
     except FileNotFoundError:
         pending_path = state_path.with_name(state_path.name + ".pending")
         try:
-            browser_id = pending_path.read_text(encoding="utf-8").strip()
+            raw = pending_path.read_text(encoding="utf-8")
         except FileNotFoundError:
             return None
-        if not re.fullmatch(r"[A-Za-z0-9_-]{1,256}", browser_id):
-            raise RuntimeError(f"invalid pending remote browser recovery state for daemon {name!r}")
+        browser_id = _decode_remote_browser_id(raw, name=name, pending=True)
         os.replace(pending_path, state_path)
         _fsync_directory(state_path.parent)
         return browser_id
-    if not re.fullmatch(r"[A-Za-z0-9_-]{1,256}", browser_id):
-        raise RuntimeError(f"invalid remote browser recovery state for daemon {name!r}")
-    return browser_id
+    return _decode_remote_browser_id(raw, name=name, pending=False)
 
 
 def _clear_remote_browser_id(name):
