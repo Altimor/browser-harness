@@ -841,6 +841,31 @@ def test_start_remote_daemon_does_not_stop_created_browser_on_success(monkeypatc
     assert admin._read_remote_browser_id("remote") == "browser-123"
 
 
+def test_start_remote_daemon_opens_live_view_by_default(monkeypatch):
+    browser = {"id": "browser-123", "liveUrl": "https://live.example"}
+    shown = []
+    monkeypatch.delenv("BH_OPEN_LIVE_URL", raising=False)
+    monkeypatch.setattr(admin, "_start_remote_daemon_locked", lambda *_args, **_kwargs: browser)
+    monkeypatch.setattr(admin, "_show_live_url", shown.append)
+
+    assert admin.start_remote_daemon("scoped") == browser
+    assert shown == ["https://live.example"]
+
+
+@pytest.mark.parametrize("value", ["0", "false", "NO", " off "])
+def test_start_remote_daemon_can_suppress_live_view_for_orchestrators(monkeypatch, value):
+    browser = {"id": "browser-123", "liveUrl": "https://live.example"}
+    monkeypatch.setenv("BH_OPEN_LIVE_URL", value)
+    monkeypatch.setattr(admin, "_start_remote_daemon_locked", lambda *_args, **_kwargs: browser)
+    monkeypatch.setattr(
+        admin,
+        "_show_live_url",
+        lambda _url: pytest.fail("suppressed live view must not be printed or opened"),
+    )
+
+    assert admin.start_remote_daemon("scoped") == browser
+
+
 def test_concurrent_same_name_remote_starts_provision_once(monkeypatch, tmp_path):
     state_path = tmp_path / "remote-id"
     daemon_started = threading.Event()

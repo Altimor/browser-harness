@@ -169,6 +169,8 @@ If you get stuck on a browser mechanic, check https://github.com/browser-use/bro
 - Trusted orchestrators that already provisioned an exact named daemon can set
   `BH_REQUIRE_EXISTING_DAEMON=1`. Each CLI call then health-checks and reuses
   that daemon or fails closed; it never auto-starts or discovers another Chrome.
+- Trusted orchestrators can set `BH_OPEN_LIVE_URL=0` while provisioning a Cloud
+  daemon to keep its interactive live-view URL from being printed or opened.
 - Core helpers stay short. Put task-specific helper additions in `$BH_AGENT_WORKSPACE/agent_helpers.py`.
 
 ## Gotchas
