@@ -8,6 +8,7 @@ import subprocess
 import sys
 import time
 import urllib.request
+import uuid
 from contextlib import contextmanager
 from pathlib import Path
 
@@ -925,19 +926,29 @@ def _start_remote_daemon_locked(name, profileName=None, **create_kwargs):
         if "profileId" in create_kwargs:
             raise RuntimeError("pass profileName OR profileId, not both")
         create_kwargs["profileId"] = _resolve_profile_name(profileName)
-    browser = _browser_use("/browsers", "POST", create_kwargs)
+
+    if "clientSessionId" in create_kwargs:
+        raise ValueError("clientSessionId is managed internally by browser-harness")
+    browser_id = str(uuid.uuid4())
+    # Persist the exact future provider ID before the billable POST. Cloud's
+    # optional clientSessionId contract makes this the BrowserSession row/VM
+    # ID, so SIGKILL after the request is sent remains exactly recoverable.
+    _persist_remote_browser_id(name, browser_id)
     try:
-        # Persist the exact billable resource before starting the daemon. Keep
-        # persistence in the same rollback boundary: a full disk or permission
-        # error must stop the browser we just created instead of orphaning it.
-        _persist_remote_browser_id(name, browser.get("id"))
+        browser = _browser_use(
+            "/browsers",
+            "POST",
+            {**create_kwargs, "clientSessionId": browser_id},
+        )
+        if browser.get("id") != browser_id:
+            raise RuntimeError("cloud returned a different browser session ID")
         _ensure_daemon_locked(
             name=name,
-            env={"BU_CDP_WS": _cdp_ws_from_url(browser["cdpUrl"]), "BU_BROWSER_ID": browser["id"]},
+            env={"BU_CDP_WS": _cdp_ws_from_url(browser["cdpUrl"]), "BU_BROWSER_ID": browser_id},
         )
     except BaseException as start_error:
         try:
-            _stop_cloud_browser(browser.get("id"), strict=True)
+            _stop_cloud_browser(browser_id, strict=True)
         except BaseException as cleanup_error:
             raise BaseExceptionGroup(
                 "remote daemon startup and cloud browser cleanup both failed",

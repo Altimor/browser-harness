@@ -210,6 +210,7 @@ def test_remote_stop_ignores_corrupt_recovery_state_after_live_clean_shutdown(mo
 def test_remote_start_retries_cleanup_and_preserves_both_failures(monkeypatch, tmp_path):
     attempts = []
     monkeypatch.setattr(admin, "daemon_alive", lambda _name: False)
+    monkeypatch.setattr(admin.uuid, "uuid4", lambda: "browser-1")
     monkeypatch.setattr(
         admin,
         "_browser_use",
@@ -240,14 +241,13 @@ def test_remote_start_retries_cleanup_and_preserves_both_failures(monkeypatch, t
     assert admin._read_remote_browser_id("scoped") == "browser-1"
 
 
-def test_remote_start_retains_complete_pending_record_when_promotion_and_cleanup_fail(
-    monkeypatch, tmp_path
-):
+def test_remote_start_does_not_post_when_recovery_state_cannot_promote(monkeypatch, tmp_path):
     state_path = tmp_path / "remote-id"
     pending_path = tmp_path / "remote-id.pending"
     attempts = []
     real_replace = admin.os.replace
     monkeypatch.setattr(admin, "daemon_alive", lambda _name: False)
+    monkeypatch.setattr(admin.uuid, "uuid4", lambda: "browser-1")
     monkeypatch.setattr(
         admin,
         "_browser_use",
@@ -266,14 +266,10 @@ def test_remote_start_retains_complete_pending_record_when_promotion_and_cleanup
         lambda _source, _destination: (_ for _ in ()).throw(OSError("rename failed")),
     )
 
-    with pytest.raises(BaseExceptionGroup) as exc_info:
+    with pytest.raises(OSError, match="rename failed"):
         admin.start_remote_daemon("scoped")
 
-    assert [str(error) for error in exc_info.value.exceptions] == [
-        "rename failed",
-        "failed to stop remote browser browser-1: billing stop failed",
-    ]
-    assert len(attempts) == 3
+    assert attempts == []
     assert pending_path.read_text() == admin._encode_remote_browser_id("browser-1")
     assert not state_path.exists()
 
@@ -754,6 +750,7 @@ def test_start_remote_daemon_stops_created_browser_when_daemon_start_fails(monke
         raise AssertionError((path, method, body))
 
     monkeypatch.setattr(admin, "daemon_alive", lambda name: False)
+    monkeypatch.setattr(admin.uuid, "uuid4", lambda: "browser-123")
     monkeypatch.setattr(admin, "_browser_use", fake_browser_use)
     monkeypatch.setattr(admin, "_cdp_ws_from_url", lambda url: "ws://example.test/devtools/browser/1")
     monkeypatch.setattr(admin, "_ensure_daemon_locked", lambda **kwargs: (_ for _ in ()).throw(RuntimeError("boom")))
@@ -763,7 +760,7 @@ def test_start_remote_daemon_stops_created_browser_when_daemon_start_fails(monke
         admin.start_remote_daemon()
 
     assert calls == [
-        ("/browsers", "POST", {}),
+        ("/browsers", "POST", {"clientSessionId": "browser-123"}),
         ("/browsers/browser-123", "PATCH", {"action": "stop"}),
     ]
     assert not (tmp_path / "remote-id").exists()
@@ -784,6 +781,7 @@ def test_start_remote_daemon_stops_created_browser_when_recovery_state_cannot_pe
         raise AssertionError((path, method, body))
 
     monkeypatch.setattr(admin, "daemon_alive", lambda _name: False)
+    monkeypatch.setattr(admin.uuid, "uuid4", lambda: "browser-123")
     monkeypatch.setattr(admin, "_browser_use", fake_browser_use)
     monkeypatch.setattr(admin.ipc, "remote_id_path", lambda _name: tmp_path / "remote-id")
     monkeypatch.setattr(
@@ -801,10 +799,7 @@ def test_start_remote_daemon_stops_created_browser_when_recovery_state_cannot_pe
     with pytest.raises(OSError, match="disk full"):
         admin.start_remote_daemon("scoped")
 
-    assert calls == [
-        ("/browsers", "POST", {}),
-        ("/browsers/browser-123", "PATCH", {"action": "stop"}),
-    ]
+    assert calls == []
 
 
 @pytest.mark.parametrize("exc_type", [KeyboardInterrupt, SystemExit])
@@ -821,6 +816,7 @@ def test_start_remote_daemon_stops_created_browser_when_daemon_start_is_interrup
         raise AssertionError((path, method, body))
 
     monkeypatch.setattr(admin, "daemon_alive", lambda name: False)
+    monkeypatch.setattr(admin.uuid, "uuid4", lambda: "browser-123")
     monkeypatch.setattr(admin, "_browser_use", fake_browser_use)
     monkeypatch.setattr(admin, "_cdp_ws_from_url", lambda url: "ws://example.test/devtools/browser/1")
     monkeypatch.setattr(admin, "_ensure_daemon_locked", lambda **kwargs: (_ for _ in ()).throw(exc_type()))
@@ -830,7 +826,7 @@ def test_start_remote_daemon_stops_created_browser_when_daemon_start_is_interrup
         admin.start_remote_daemon()
 
     assert calls == [
-        ("/browsers", "POST", {}),
+        ("/browsers", "POST", {"clientSessionId": "browser-123"}),
         ("/browsers/browser-123", "PATCH", {"action": "stop"}),
     ]
     assert not (tmp_path / "remote-id").exists()
@@ -849,10 +845,12 @@ def test_start_remote_daemon_does_not_stop_created_browser_on_success(monkeypatc
     def fake_browser_use(path, method, body=None):
         calls.append((path, method, body))
         if (path, method) == ("/browsers", "POST"):
+            assert admin._read_remote_browser_id("remote") == "browser-123"
             return browser
         raise AssertionError((path, method, body))
 
     monkeypatch.setattr(admin, "daemon_alive", lambda name: False)
+    monkeypatch.setattr(admin.uuid, "uuid4", lambda: "browser-123")
     monkeypatch.setattr(admin, "_browser_use", fake_browser_use)
     monkeypatch.setattr(admin, "_cdp_ws_from_url", lambda url: "ws://example.test/devtools/browser/1")
     monkeypatch.setattr(admin, "_ensure_daemon_locked", lambda **kwargs: None)
@@ -861,9 +859,45 @@ def test_start_remote_daemon_does_not_stop_created_browser_on_success(monkeypatc
 
     assert admin.start_remote_daemon() == browser
     assert calls == [
-        ("/browsers", "POST", {}),
+        ("/browsers", "POST", {"clientSessionId": "browser-123"}),
     ]
     assert admin._read_remote_browser_id("remote") == "browser-123"
+
+
+def test_start_remote_daemon_rejects_client_session_id_override(monkeypatch):
+    monkeypatch.setattr(admin, "daemon_alive", lambda _name: False)
+    monkeypatch.setattr(
+        admin,
+        "_browser_use",
+        lambda *_args, **_kwargs: pytest.fail("invalid caller input must not reach Cloud"),
+    )
+
+    with pytest.raises(ValueError, match="managed internally"):
+        admin.start_remote_daemon(clientSessionId="caller-selected")
+
+
+def test_start_remote_daemon_rejects_mismatched_cloud_id_and_cleans_up(monkeypatch, tmp_path):
+    calls = []
+
+    def browser_use(path, method, body=None):
+        calls.append((path, method, body))
+        if method == "POST":
+            return {"id": "different-id", "cdpUrl": "https://cdp.example.test"}
+        return {}
+
+    monkeypatch.setattr(admin, "daemon_alive", lambda _name: False)
+    monkeypatch.setattr(admin.uuid, "uuid4", lambda: "browser-123")
+    monkeypatch.setattr(admin, "_browser_use", browser_use)
+    monkeypatch.setattr(admin.ipc, "remote_id_path", lambda _name: tmp_path / "remote-id")
+
+    with pytest.raises(RuntimeError, match="different browser session ID"):
+        admin.start_remote_daemon()
+
+    assert calls == [
+        ("/browsers", "POST", {"clientSessionId": "browser-123"}),
+        ("/browsers/browser-123", "PATCH", {"action": "stop"}),
+    ]
+    assert not (tmp_path / "remote-id").exists()
 
 
 def test_start_remote_daemon_opens_live_view_by_default(monkeypatch):
@@ -900,6 +934,7 @@ def test_concurrent_same_name_remote_starts_provision_once(monkeypatch, tmp_path
     results = []
     errors = []
     monkeypatch.setattr(admin.ipc, "remote_id_path", lambda _name: state_path)
+    monkeypatch.setattr(admin.uuid, "uuid4", lambda: "browser-1")
     monkeypatch.setattr(admin, "daemon_alive", lambda _name: daemon_started.is_set())
 
     def browser_use(path, method, body=None):
@@ -974,6 +1009,7 @@ def test_remote_start_serializes_against_ordinary_ensure(monkeypatch, tmp_path):
         return FakeSocket(response=b'{"result":{"targetInfos":[]}}\n'), None
 
     monkeypatch.setattr(admin.ipc, "remote_id_path", lambda _name: state_path)
+    monkeypatch.setattr(admin.uuid, "uuid4", lambda: "browser-1")
     monkeypatch.setattr(admin.ipc, "log_path", lambda _name: tmp_path / "daemon.log")
     monkeypatch.setattr(admin, "_remote_daemon_lifecycle_lock", observed_lifecycle_lock)
     monkeypatch.setattr(admin, "daemon_alive", lambda _name=None: daemon_started.is_set())
@@ -1042,6 +1078,7 @@ def test_reload_serializes_against_remote_provision(monkeypatch, tmp_path):
         return {"id": "browser-1", "cdpUrl": "https://cdp.example.test"}
 
     monkeypatch.setattr(admin.ipc, "remote_id_path", lambda _name: state_path)
+    monkeypatch.setattr(admin.uuid, "uuid4", lambda: "browser-1")
     monkeypatch.setattr(admin, "_remote_daemon_lifecycle_lock", observed_lifecycle_lock)
     monkeypatch.setattr(admin, "daemon_alive", lambda _name=None: daemon_started.is_set())
     monkeypatch.setattr(admin, "_browser_use", browser_use)
