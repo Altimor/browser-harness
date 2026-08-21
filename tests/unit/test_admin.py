@@ -1,4 +1,5 @@
 import threading
+import urllib.error
 from contextlib import contextmanager
 
 import pytest
@@ -245,12 +246,16 @@ def test_remote_start_does_not_post_when_recovery_state_cannot_promote(monkeypat
         admin.start_remote_daemon("scoped")
 
     assert attempts == []
-    assert pending_path.read_text() == admin._encode_remote_browser_id("browser-1")
+    expected = admin._encode_remote_browser_recovery(client_session_id="browser-1")
+    assert pending_path.read_text() == expected
     assert not state_path.exists()
 
     monkeypatch.setattr(admin.os, "replace", real_replace)
-    assert admin._read_remote_browser_id("scoped") == "browser-1"
-    assert state_path.read_text() == admin._encode_remote_browser_id("browser-1")
+    assert admin._read_remote_browser_recovery("scoped") == {
+        "browser_id": None,
+        "client_session_id": "browser-1",
+    }
+    assert state_path.read_text() == expected
     assert not pending_path.exists()
 
 
@@ -761,8 +766,8 @@ def test_start_remote_daemon_stops_created_browser_when_recovery_state_cannot_pe
     monkeypatch.setattr(admin.ipc, "remote_id_path", lambda _name: tmp_path / "remote-id")
     monkeypatch.setattr(
         admin,
-        "_persist_remote_browser_id",
-        lambda *_args: (_ for _ in ()).throw(OSError("disk full")),
+        "_persist_remote_browser_recovery",
+        lambda *_args, **_kwargs: (_ for _ in ()).throw(OSError("disk full")),
     )
     monkeypatch.setattr(
         admin,
@@ -815,12 +820,15 @@ def test_stop_cloud_browser_swallows_baseexception_from_stop_request(monkeypatch
 
 def test_start_remote_daemon_does_not_stop_created_browser_on_success(monkeypatch, tmp_path):
     calls = []
-    browser = {"id": "browser-123", "cdpUrl": "http://127.0.0.1:9333", "liveUrl": "https://live.example"}
+    browser = {"id": "server-browser-456", "cdpUrl": "http://127.0.0.1:9333", "liveUrl": "https://live.example"}
 
     def fake_browser_use(path, method, body=None):
         calls.append((path, method, body))
         if (path, method) == ("/browsers", "POST"):
-            assert admin._read_remote_browser_id("remote") == "browser-123"
+            assert admin._read_remote_browser_recovery("remote") == {
+                "browser_id": None,
+                "client_session_id": "browser-123",
+            }
             return browser
         raise AssertionError((path, method, body))
 
@@ -836,7 +844,10 @@ def test_start_remote_daemon_does_not_stop_created_browser_on_success(monkeypatc
     assert calls == [
         ("/browsers", "POST", {"clientSessionId": "browser-123"}),
     ]
-    assert admin._read_remote_browser_id("remote") == "browser-123"
+    assert admin._read_remote_browser_recovery("remote") == {
+        "browser_id": "server-browser-456",
+        "client_session_id": "browser-123",
+    }
 
 
 def test_start_remote_daemon_rejects_client_session_id_override(monkeypatch):
@@ -851,28 +862,51 @@ def test_start_remote_daemon_rejects_client_session_id_override(monkeypatch):
         admin.start_remote_daemon(clientSessionId="caller-selected")
 
 
-def test_start_remote_daemon_rejects_mismatched_cloud_id_and_cleans_up(monkeypatch, tmp_path):
+def test_crash_recovery_resolves_client_key_before_stopping_server_browser(monkeypatch, tmp_path):
     calls = []
+    state_path = tmp_path / "remote-id"
+    monkeypatch.setattr(admin.ipc, "remote_id_path", lambda _name: state_path)
+    admin._persist_remote_browser_recovery("remote", client_session_id="client-key-123")
 
     def browser_use(path, method, body=None):
         calls.append((path, method, body))
-        if method == "POST":
-            return {"id": "different-id", "cdpUrl": "https://cdp.example.test"}
-        return {}
+        if (path, method) == ("/browsers/client-session/client-key-123", "GET"):
+            return {"id": "server-browser-456"}
+        if (path, method) == ("/browsers/server-browser-456", "PATCH"):
+            return {}
+        raise AssertionError((path, method, body))
 
     monkeypatch.setattr(admin, "daemon_alive", lambda _name: False)
-    monkeypatch.setattr(admin.uuid, "uuid4", lambda: "browser-123")
     monkeypatch.setattr(admin, "_browser_use", browser_use)
-    monkeypatch.setattr(admin.ipc, "remote_id_path", lambda _name: tmp_path / "remote-id")
+    monkeypatch.setattr(admin, "_restart_daemon_locked", lambda _name: None)
 
-    with pytest.raises(RuntimeError, match="different browser session ID"):
-        admin.start_remote_daemon()
+    admin.stop_remote_daemon("remote")
 
     assert calls == [
-        ("/browsers", "POST", {"clientSessionId": "browser-123"}),
-        ("/browsers/browser-123", "PATCH", {"action": "stop"}),
+        ("/browsers/client-session/client-key-123", "GET", None),
+        ("/browsers/server-browser-456", "PATCH", {"action": "stop"}),
     ]
-    assert not (tmp_path / "remote-id").exists()
+    assert not state_path.exists()
+
+
+def test_crash_recovery_clears_key_when_cloud_never_created_a_session(monkeypatch, tmp_path):
+    state_path = tmp_path / "remote-id"
+    monkeypatch.setattr(admin.ipc, "remote_id_path", lambda _name: state_path)
+    admin._persist_remote_browser_recovery("remote", client_session_id="client-key-123")
+
+    def browser_use(path, method, body=None):
+        assert (path, method, body) == (
+            "/browsers/client-session/client-key-123", "GET", None
+        )
+        raise urllib.error.HTTPError(path, 404, "not found", None, None)
+
+    monkeypatch.setattr(admin, "daemon_alive", lambda _name: False)
+    monkeypatch.setattr(admin, "_browser_use", browser_use)
+    monkeypatch.setattr(admin, "_restart_daemon_locked", lambda _name: None)
+
+    admin.stop_remote_daemon("remote")
+
+    assert not state_path.exists()
 
 
 def test_start_remote_daemon_opens_live_view_by_default(monkeypatch):
