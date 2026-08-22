@@ -621,6 +621,12 @@ def _show_live_url(url):
         print(f"(couldn't auto-open: {e} — share the liveUrl with the user)", file=sys.stderr)
 
 
+def _should_show_remote_live_view():
+    """Whether Cloud provisioning should print and open its interactive live view."""
+    raw = os.environ.get("BH_OPEN_LIVE_URL")
+    return raw is None or raw.strip().lower() not in {"0", "false", "no", "off"}
+
+
 def list_cloud_profiles():
     """List cloud profiles under the current API key.
 
@@ -695,7 +701,8 @@ def start_remote_daemon(name="remote", profileName=None, **create_kwargs):
                 [start_error, cleanup_error],
             )
         raise
-    _show_live_url(browser.get("liveUrl"))
+    if _should_show_remote_live_view():
+        _show_live_url(browser.get("liveUrl"))
     return browser
 
 
