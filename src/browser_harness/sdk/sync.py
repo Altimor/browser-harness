@@ -225,6 +225,36 @@ class SyncBrowser:
 
     # --- element discovery ---
 
+    # --- browser_use.BrowserSession-compatible aliases ---
+
+    def navigate_to(self, url: str, new_tab: bool = False) -> None:
+        return _block(self._browser.navigate_to(url, new_tab=new_tab))
+
+    def get_tabs(self) -> list[Tab]:
+        return _block(self._browser.get_tabs())
+
+    def get_current_page_url(self) -> str:
+        return _block(self._browser.get_current_page_url())
+
+    def get_current_page_title(self) -> str:
+        return _block(self._browser.get_current_page_title())
+
+    def take_screenshot(self, path: str | Path | None = None, full_page: bool = False) -> Path:
+        return _block(self._browser.take_screenshot(path, full_page=full_page))
+
+    def close(self) -> None:
+        return _block(self._browser.close())
+
+    def kill(self) -> None:
+        return _block(self._browser.kill())
+
+    def cookies(self) -> list[dict]:
+        return _block(self._browser.cookies())
+
+    @classmethod
+    def from_system_chrome(cls, **kwargs) -> "SyncBrowser":
+        return cls(**kwargs)
+
     def find_all(self, role: str | None = None, name: str | None = None, *, limit: int | None = None) -> list[SyncElement]:
         return [SyncElement(e) for e in _block(self._browser.find_all(role, name, limit=limit))]
 

@@ -564,6 +564,48 @@ class Browser:
                 break
         return out
 
+    # --- browser_use.BrowserSession-compatible aliases ---
+    # canonical names above mirror the CLI helpers; these let browser-use code
+    # run unchanged. both call the same implementation.
+
+    async def navigate_to(self, url: str, new_tab: bool = False) -> None:
+        """browser_use.BrowserSession.navigate_to"""
+        await (self.new_tab(url) if new_tab else self.goto_url(url))
+
+    async def get_tabs(self) -> list[Tab]:
+        """browser_use.BrowserSession.get_tabs"""
+        return await self.list_tabs()
+
+    async def get_current_page_url(self) -> str:
+        """browser_use.BrowserSession.get_current_page_url"""
+        return (await self.current_tab()).url
+
+    async def get_current_page_title(self) -> str:
+        """browser_use.BrowserSession.get_current_page_title"""
+        return (await self.current_tab()).title
+
+    async def take_screenshot(self, path: str | Path | None = None, full_page: bool = False) -> Path:
+        """browser_use.BrowserSession.take_screenshot"""
+        return await self.capture_screenshot(path, full=full_page)
+
+    async def close(self) -> None:
+        """browser_use.BrowserSession.close -- detaches; the browser stays open."""
+        await self.stop()
+
+    async def kill(self) -> None:
+        """browser_use.BrowserSession.kill -- stops the daemon (and cloud billing)."""
+        await self.shutdown_daemon()
+
+    async def cookies(self) -> list[dict]:
+        """browser_use.BrowserSession.cookies"""
+        return (await self.cdp("Network.getCookies")).get("cookies", [])
+
+    @classmethod
+    def from_system_chrome(cls, **kwargs) -> "Browser":
+        """browser_use.BrowserSession.from_system_chrome -- the harness always
+        attaches to your real Chrome, so this is the default constructor."""
+        return cls(**kwargs)
+
     async def find(
         self,
         role: str | None = None,
