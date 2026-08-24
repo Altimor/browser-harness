@@ -11,6 +11,8 @@ from typing import TYPE_CHECKING
 _LAZY_IMPORTS = {
     "Browser": ("browser_harness.sdk.browser", "Browser"),
     "Element": ("browser_harness.sdk.browser", "Element"),
+    "SyncBrowser": ("browser_harness.sdk.sync", "SyncBrowser"),
+    "SyncElement": ("browser_harness.sdk.sync", "SyncElement"),
     "HarnessClient": ("browser_harness.sdk.client", "HarnessClient"),
     "HarnessError": ("browser_harness.sdk.client", "HarnessError"),
     "DialogInfo": ("browser_harness.sdk.views", "DialogInfo"),
@@ -21,6 +23,7 @@ _LAZY_IMPORTS = {
 
 if TYPE_CHECKING:
     from browser_harness.sdk.browser import Browser, Element
+    from browser_harness.sdk.sync import SyncBrowser, SyncElement
     from browser_harness.sdk.client import HarnessClient, HarnessError
     from browser_harness.sdk.views import DialogInfo, PageInfo, Rect, Tab
 
@@ -43,5 +46,7 @@ __all__ = [
     "HarnessError",
     "PageInfo",
     "Rect",
+    "SyncBrowser",
+    "SyncElement",
     "Tab",
 ]

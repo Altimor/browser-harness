@@ -9,11 +9,14 @@ coexist in one process. Needs the `sdk` extra for pydantic.
 """
 
 from .browser import Browser, Element
+from .sync import SyncBrowser, SyncElement
 from .client import HarnessClient, HarnessError
 from .views import DialogInfo, PageInfo, Rect, Tab
 
 __all__ = [
     "Browser",
+    "SyncBrowser",
+    "SyncElement",
     "DialogInfo",
     "Element",
     "HarnessClient",
