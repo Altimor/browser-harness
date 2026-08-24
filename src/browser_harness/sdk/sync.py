@@ -88,7 +88,7 @@ class SyncBrowser:
         cdp_ws: str | None = None,
         env: dict[str, str] | None = None,
         auto_start: bool = True,
-        request_timeout: float = 30.0,
+        request_timeout: float = 5.0,
     ):
         self._browser = Browser(
             name,

@@ -16,7 +16,10 @@ class HarnessError(RuntimeError):
 
 
 class HarnessClient:
-    def __init__(self, name: str = "default", *, request_timeout: float = 30.0, env: dict[str, str] | None = None):
+    def __init__(self, name: str = "default", *, request_timeout: float = 5.0, env: dict[str, str] | None = None):
+        """request_timeout defaults to 5s to match the CLI's socket timeout
+        (ipc.connect(timeout=5.0)); a wedged page must fail fast, not hang.
+        Long operations pass an explicit timeout."""
         ipc._check(name)
         self.name = name
         self.request_timeout = request_timeout

@@ -163,7 +163,7 @@ class Browser:
         cdp_ws: str | None = None,
         env: dict[str, str] | None = None,
         auto_start: bool = True,
-        request_timeout: float = 30.0,
+        request_timeout: float = 5.0,
     ):
         merged_env = dict(env or {})
         if cdp_url:
@@ -379,7 +379,7 @@ class Browser:
         return base64.b64encode(_downscale_png(base64.b64decode(b64), max_dim)).decode()
 
     async def _screenshot_b64_raw(self, full: bool) -> str:
-        r = await self.cdp("Page.captureScreenshot", format="png", captureBeyondViewport=full)
+        r = await self.cdp("Page.captureScreenshot", format="png", captureBeyondViewport=full, request_timeout=30.0)
         return r["data"]
 
     async def http_get(self, url: str, headers: dict | None = None, timeout: float = 20.0) -> str:
@@ -412,10 +412,11 @@ class Browser:
     async def switch_tab(self, target: str | Tab | dict) -> str:
         """Attach to a tab; accepts a Tab, a raw targetId, or a dict with one."""
         target_id = _target_id_of(target)
-        # unmark old tab -- horse emoji is 2 utf-16 units + space, hence slice(3)
+        # unmark old tab -- horse emoji is 2 utf-16 units + space, hence slice(3).
+        # a wedged page raises TimeoutError here; marking is cosmetic, never fatal
         try:
             await self.cdp("Runtime.evaluate", expression="if(document.title.startsWith('\U0001F434 '))document.title=document.title.slice(3)")
-        except HarnessError:
+        except (HarnessError, TimeoutError, asyncio.TimeoutError):
             pass
         await self.cdp("Target.activateTarget", targetId=target_id)
         sid = (await self.cdp("Target.attachToTarget", targetId=target_id, flatten=True))["sessionId"]
@@ -426,7 +427,7 @@ class Browser:
     async def _mark_tab(self) -> None:
         try:
             await self.cdp("Runtime.evaluate", expression="if(!document.title.startsWith('\U0001F434'))document.title='\U0001F434 '+document.title")
-        except HarnessError:
+        except (HarnessError, TimeoutError, asyncio.TimeoutError):
             pass
 
     async def new_tab(self, url: str = "about:blank") -> str:
@@ -463,7 +464,7 @@ class Browser:
             cur = await self.current_tab()
             if cur.url and not cur.url.startswith(INTERNAL):
                 return cur
-        except HarnessError:
+        except (HarnessError, TimeoutError, asyncio.TimeoutError):
             pass
         await self.switch_tab(tabs[0])
         return tabs[0]
