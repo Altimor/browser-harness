@@ -258,6 +258,19 @@ def test_cli_doctor_json_requires_existing_daemon():
     doctor.assert_called_once_with(require_existing_daemon=True)
 
 
+def test_cli_doctor_json_uses_non_strict_mode_by_default():
+    with patch.object(
+        sys,
+        "argv",
+        ["browser-harness", "doctor", "--json"],
+    ), patch("browser_harness.run.run_doctor_json", return_value=0) as doctor:
+        with pytest.raises(SystemExit) as exc:
+            run.main()
+
+    assert exc.value.code == 0
+    doctor.assert_called_once_with(require_existing_daemon=False)
+
+
 def test_cli_doctor_json_accepts_flags_in_either_order():
     with patch.object(
         sys,

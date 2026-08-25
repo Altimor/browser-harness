@@ -1016,9 +1016,9 @@ def run_doctor_json(require_existing_daemon=False):
     """
     strict = bool(require_existing_daemon)
     chrome = None if strict else _chrome_running()
-    browser_ready = _daemon_browser_connection(NAME) is not None
+    browser_ready = daemon_browser_ready(NAME)
     daemon = browser_ready or daemon_alive(NAME)
-    healthy = (daemon and browser_ready) if strict else (chrome and daemon)
+    healthy = (daemon and browser_ready) if strict else (browser_ready or (chrome and daemon))
     report = {
         "schema_version": 1,
         "healthy": healthy,
