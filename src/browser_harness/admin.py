@@ -1007,6 +1007,35 @@ def run_doctor():
     return 0 if (chrome and daemon) else 1
 
 
+def run_doctor_json(require_existing_daemon=False):
+    """Print a stable, non-networked runtime health report as JSON.
+
+    The strict mode is intended for trusted orchestrators that provision an
+    exact named daemon. It checks only that selected daemon and its live CDP
+    connection; it never starts, repairs, or discovers another daemon.
+    """
+    strict = bool(require_existing_daemon)
+    chrome = None if strict else _chrome_running()
+    browser_ready = _daemon_browser_connection(NAME) is not None
+    daemon = browser_ready or daemon_alive(NAME)
+    healthy = (daemon and browser_ready) if strict else (chrome and daemon)
+    report = {
+        "schema_version": 1,
+        "healthy": healthy,
+        "require_existing_daemon": strict,
+        "version": _version() or None,
+        "install_mode": _install_mode(),
+        "chrome_running": chrome,
+        "daemon": {
+            "name": NAME,
+            "alive": daemon,
+            "browser_ready": browser_ready,
+        },
+    }
+    print(json.dumps(report, sort_keys=True))
+    return 0 if healthy else 1
+
+
 def _prompt_yes(question, default_yes=True, yes=False):
     if yes:
         return True

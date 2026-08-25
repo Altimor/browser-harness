@@ -245,6 +245,32 @@ def test_cli_doctor_fix_snap_invokes_guide():
     m.assert_called_once()
 
 
+def test_cli_doctor_json_requires_existing_daemon():
+    with patch.object(
+        sys,
+        "argv",
+        ["browser-harness", "doctor", "--json", "--require-existing-daemon"],
+    ), patch("browser_harness.run.run_doctor_json", return_value=0) as doctor:
+        with pytest.raises(SystemExit) as exc:
+            run.main()
+
+    assert exc.value.code == 0
+    doctor.assert_called_once_with(require_existing_daemon=True)
+
+
+def test_cli_doctor_json_accepts_flags_in_either_order():
+    with patch.object(
+        sys,
+        "argv",
+        ["browser-harness", "doctor", "--require-existing-daemon", "--json"],
+    ), patch("browser_harness.run.run_doctor_json", return_value=1) as doctor:
+        with pytest.raises(SystemExit) as exc:
+            run.main()
+
+    assert exc.value.code == 1
+    doctor.assert_called_once_with(require_existing_daemon=True)
+
+
 def test_cli_doctor_rejects_unknown_flags():
     err = StringIO()
     with patch.object(sys, "argv", ["browser-harness", "doctor", "--bogus"]), patch("sys.stderr", err):
