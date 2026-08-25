@@ -22,6 +22,7 @@ from .admin import (
     restart_daemon,
     run_doctor,
     run_doctor_fix_snap,
+    run_doctor_json,
     run_update,
     start_remote_daemon,
     stop_remote_daemon,
@@ -46,6 +47,8 @@ Commands:
   browser-harness --version        print the installed version
   browser-harness --doctor         diagnose install, daemon, and browser state
   browser-harness doctor           same as --doctor
+  browser-harness doctor --json [--require-existing-daemon]
+                                    print machine-readable runtime health
   browser-harness doctor --fix-snap   print how to fix Snap Chromium blocking CDP (Linux)
   browser-harness mac-approve         approve Chrome's macOS remote debugging sheet
   browser-harness auth login          sign in to Browser Use Cloud for cloud browsers
@@ -307,8 +310,11 @@ def _run(args):
         rest = args[1:]
         if rest == ["--fix-snap"]:
             sys.exit(run_doctor_fix_snap())
+        if rest and set(rest).issubset({"--json", "--require-existing-daemon"}) \
+                and "--json" in rest and len(rest) == len(set(rest)):
+            sys.exit(run_doctor_json(require_existing_daemon="--require-existing-daemon" in rest))
         if rest:
-            print("usage: browser-harness doctor [--fix-snap]", file=sys.stderr)
+            print("usage: browser-harness doctor [--fix-snap|--json [--require-existing-daemon]]", file=sys.stderr)
             sys.exit(2)
         sys.exit(run_doctor())
     if args and args[0] == "auth":
