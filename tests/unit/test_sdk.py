@@ -5,7 +5,7 @@ from pathlib import Path
 
 import pytest
 
-from browser_harness.sdk import Browser, HarnessError, PageInfo
+from browser_harness.sdk import Browser, Element, HarnessError, PageInfo
 from browser_harness.sdk.views import Tab
 
 
@@ -271,28 +271,42 @@ def test_every_timeout_surfaces_as_harness_error():
 
     sock_path = Path(tempfile.mkdtemp(prefix="bhto")) / "bu.sock"
 
-    async def scenario(call):
+    async def scenario():
+        stop = asyncio.Event()
+
         async def handler(reader, writer):
             await reader.readline()
-            await asyncio.Event().wait()  # hold it open: closing would look like ConnectionError
+            await stop.wait()  # hold the connection open; never answer
 
         server = await asyncio.start_unix_server(handler, path=str(sock_path))
-        async with server:
+        try:
             client = HarnessClient("default", request_timeout=0.15)
-            return await call(client)
+            raised = []
+            for call in (
+                lambda: client.cdp("Page.navigate", url="x"),
+                lambda: client.meta("current_tab"),
+                lambda: client.send({"method": "DOM.getDocument", "params": {}}),
+            ):
+                try:
+                    await call()
+                except BaseException as e:  # noqa: BLE001 - the type is the assertion
+                    raised.append(e)
+            return raised
+        finally:
+            stop.set()  # release handlers before closing, or close() waits forever
+            server.close()
 
     original = _ipc._sock_path
     _ipc._sock_path = lambda name: sock_path
     try:
-        for call in (
-            lambda c: c.cdp("Page.navigate", url="x"),
-            lambda c: c.meta("current_tab"),
-            lambda c: c.send({"method": "DOM.getDocument", "params": {}}),
-        ):
-            with pytest.raises(HarnessError, match="timed out"):
-                asyncio.run(scenario(call))
+        raised = asyncio.run(scenario())
     finally:
         _ipc._sock_path = original
+
+    assert len(raised) == 3, "every call should have failed"
+    for error in raised:
+        assert isinstance(error, HarnessError), f"got {type(error).__name__}, not HarnessError"
+        assert "timed out" in str(error)
 
 
 def test_stale_element_error_is_actionable_and_keeps_box_model_text():
