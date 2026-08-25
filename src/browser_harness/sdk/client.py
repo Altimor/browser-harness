@@ -88,7 +88,14 @@ class HarnessClient:
                 req = {**req, "token": token}
             writer.write((json.dumps(req) + "\n").encode())
             await writer.drain()
-            data = await asyncio.wait_for(reader.readline(), timeout=timeout or self.request_timeout)
+            budget = timeout or self.request_timeout
+            try:
+                data = await asyncio.wait_for(reader.readline(), timeout=budget)
+            except (TimeoutError, asyncio.TimeoutError) as e:
+                # normalize here so every SDK call raises HarnessError; callers
+                # writing `except HarnessError` must not miss timeouts
+                shape = req.get("method") or f'meta:{req.get("meta", "?")}'
+                raise HarnessError(f"{shape} timed out after {budget}s") from e
             return json.loads(data or b"{}")
         finally:
             writer.close()

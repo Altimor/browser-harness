@@ -255,8 +255,10 @@ class SyncBrowser:
     def from_system_chrome(cls, **kwargs) -> "SyncBrowser":
         return cls(**kwargs)
 
-    def find_all(self, role: str | None = None, name: str | None = None, *, limit: int | None = None) -> list[SyncElement]:
-        return [SyncElement(e) for e in _block(self._browser.find_all(role, name, limit=limit))]
+    def find_all(
+        self, role: str | None = None, name: str | None = None, *, limit: int | None = None, fresh: bool = False
+    ) -> list[SyncElement]:
+        return [SyncElement(e) for e in _block(self._browser.find_all(role, name, limit=limit, fresh=fresh))]
 
     def find(self, role: str | None = None, name: str | None = None, *, timeout: float = 0.0) -> SyncElement | None:
         element = _block(self._browser.find(role, name, timeout=timeout))

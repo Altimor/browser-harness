@@ -255,3 +255,79 @@ def test_select_all_modifier_follows_browser_platform_not_client():
     # cached -- second call must not re-query the page
     transport.handlers["Runtime.evaluate"] = {"error": "should not be called"}
     asyncio.run(browser._select_all())
+
+
+# --- implementation conformance: things wire-parity cannot see ---
+
+
+def test_every_timeout_surfaces_as_harness_error():
+    """cdp() used to raise raw TimeoutError while js() raised HarnessError, so
+    `except HarnessError` silently missed timeouts -- that killed the recovery
+    paths in switch_tab/ensure_real_tab."""
+    import tempfile
+
+    from browser_harness import _ipc
+    from browser_harness.sdk.client import HarnessClient
+
+    sock_path = Path(tempfile.mkdtemp(prefix="bhto")) / "bu.sock"
+
+    async def scenario(call):
+        async def handler(reader, writer):
+            await reader.readline()
+            await asyncio.Event().wait()  # hold it open: closing would look like ConnectionError
+
+        server = await asyncio.start_unix_server(handler, path=str(sock_path))
+        async with server:
+            client = HarnessClient("default", request_timeout=0.15)
+            return await call(client)
+
+    original = _ipc._sock_path
+    _ipc._sock_path = lambda name: sock_path
+    try:
+        for call in (
+            lambda c: c.cdp("Page.navigate", url="x"),
+            lambda c: c.meta("current_tab"),
+            lambda c: c.send({"method": "DOM.getDocument", "params": {}}),
+        ):
+            with pytest.raises(HarnessError, match="timed out"):
+                asyncio.run(scenario(call))
+    finally:
+        _ipc._sock_path = original
+
+
+def test_stale_element_error_is_actionable_and_keeps_box_model_text():
+    """Stale handles gave a cryptic CDP string. The box-model message must stay
+    verbatim -- the agent layer keys its select_dropdown fallback on it."""
+    from browser_harness.sdk.browser import _stale
+
+    element = Element(None, backend_node_id=7, role="button", name="Go")  # type: ignore[arg-type]
+    stale = _stale(HarnessError("{'code': -32000, 'message': 'Node with given id does not belong to the document'}"), element)
+    assert "stale" in str(stale) and "find()" in str(stale)
+
+    box = HarnessError("{'code': -32000, 'message': 'Could not compute box model.'}")
+    assert _stale(box, element) is box, "unrelated errors must pass through unchanged"
+
+
+def test_ax_tree_is_not_refetched_for_back_to_back_lookups():
+    """Several find() calls in one agent step should not each pull a multi-MB tree."""
+    nodes = [{"backendDOMNodeId": 3, "role": {"value": "button"}, "name": {"value": "Go"}}]
+    browser, transport = make_browser({"Accessibility.getFullAXTree": {"result": {"nodes": nodes}}})
+
+    async def scenario():
+        await browser.find_all(role="button")
+        await browser.find_all(role="link")
+        await browser.find_all()
+
+    asyncio.run(scenario())
+    assert len(transport.cdp_calls("Accessibility.getFullAXTree")) == 1
+
+    # find() polls for new state, so it must bypass the cache
+    asyncio.run(browser.find_all(role="button", fresh=True))
+    assert len(transport.cdp_calls("Accessibility.getFullAXTree")) == 2
+
+
+def test_package_ships_a_py_typed_marker():
+    """Without it every downstream import resolves to Any."""
+    import browser_harness
+
+    assert (Path(browser_harness.__file__).parent / "py.typed").exists()

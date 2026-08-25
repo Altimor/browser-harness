@@ -81,6 +81,16 @@ def _runtime_value(response: dict, expression: str):
     return None
 
 
+def _stale(error: HarnessError, element: "Element") -> HarnessError:
+    """Translate a stale-node CDP error; other errors pass through unchanged so
+    callers keying on their text (e.g. "box model") still match."""
+    if "does not belong to the document" in str(error) or "Could not find node" in str(error):
+        return HarnessError(
+            f"{element!r} is stale -- the page changed since it was found. Call find()/find_all() again"
+        )
+    return error
+
+
 class Element:
     """Element handle from the AX tree. Actions click box-center coordinates,
     which pierce iframes and shadow DOM at the compositor level."""
@@ -100,7 +110,10 @@ class Element:
             await self._browser.cdp("DOM.scrollIntoViewIfNeeded", backendNodeId=self.backend_node_id)
         except HarnessError:
             pass  # older chrome / detached node -- let getBoxModel report it
-        model = (await self._browser.cdp("DOM.getBoxModel", backendNodeId=self.backend_node_id))["model"]
+        try:
+            model = (await self._browser.cdp("DOM.getBoxModel", backendNodeId=self.backend_node_id))["model"]
+        except HarnessError as e:
+            raise _stale(e, self) from e
         quad = model["content"]
         xs, ys = quad[0::2], quad[1::2]
         return Rect(x=min(xs), y=min(ys), width=max(xs) - min(xs), height=max(ys) - min(ys))
@@ -133,7 +146,10 @@ class Element:
         return await self._call_on_node("function(){return this.innerText ?? this.textContent ?? '';}") or ""
 
     async def _call_on_node(self, function_declaration: str, *args):
-        obj = await self._browser.cdp("DOM.resolveNode", backendNodeId=self.backend_node_id)
+        try:
+            obj = await self._browser.cdp("DOM.resolveNode", backendNodeId=self.backend_node_id)
+        except HarnessError as e:
+            raise _stale(e, self) from e
         object_id = obj["object"]["objectId"]
         r = await self._browser.cdp(
             "Runtime.callFunctionOn",
@@ -174,6 +190,11 @@ class Browser:
         self.auto_start = auto_start
         self._started = False
         self._select_all_modifiers: int | None = None
+        # the AX tree is megabytes on heavy pages; several find() calls in one
+        # agent step would each refetch it. TTL is deliberately shorter than
+        # find()'s poll interval so polling still observes fresh state.
+        self._ax_cache: tuple[float, list[dict]] | None = None
+        self.ax_cache_ttl = 0.2
 
     @property
     def name(self) -> str:
@@ -279,8 +300,10 @@ class Browser:
                 "Runtime.evaluate", session_id=session_id, request_timeout=timeout, expression=expression,
                 returnByValue=True, awaitPromise=await_promise,
             )
-        except (TimeoutError, asyncio.TimeoutError) as e:
-            raise HarnessError(f"Runtime.evaluate timed out; expression: {_js_snippet(expression)}") from e
+        except HarnessError as e:
+            if "timed out" in str(e):
+                raise HarnessError(f"Runtime.evaluate timed out; expression: {_js_snippet(expression)}") from e
+            raise
         return _runtime_value(r, expression)
 
     # --- input ---
@@ -416,7 +439,7 @@ class Browser:
         # a wedged page raises TimeoutError here; marking is cosmetic, never fatal
         try:
             await self.cdp("Runtime.evaluate", expression="if(document.title.startsWith('\U0001F434 '))document.title=document.title.slice(3)")
-        except (HarnessError, TimeoutError, asyncio.TimeoutError):
+        except HarnessError:
             pass
         await self.cdp("Target.activateTarget", targetId=target_id)
         sid = (await self.cdp("Target.attachToTarget", targetId=target_id, flatten=True))["sessionId"]
@@ -427,7 +450,7 @@ class Browser:
     async def _mark_tab(self) -> None:
         try:
             await self.cdp("Runtime.evaluate", expression="if(!document.title.startsWith('\U0001F434'))document.title='\U0001F434 '+document.title")
-        except (HarnessError, TimeoutError, asyncio.TimeoutError):
+        except HarnessError:
             pass
 
     async def new_tab(self, url: str = "about:blank") -> str:
@@ -464,7 +487,7 @@ class Browser:
             cur = await self.current_tab()
             if cur.url and not cur.url.startswith(INTERNAL):
                 return cur
-        except (HarnessError, TimeoutError, asyncio.TimeoutError):
+        except HarnessError:
             pass
         await self.switch_tab(tabs[0])
         return tabs[0]
@@ -537,16 +560,25 @@ class Browser:
 
     # --- element discovery (AX tree) ---
 
+    async def _ax_nodes(self, fresh: bool = False) -> list[dict]:
+        now = time.monotonic()
+        if not fresh and self._ax_cache is not None and now - self._ax_cache[0] < self.ax_cache_ttl:
+            return self._ax_cache[1]
+        nodes = (await self.cdp("Accessibility.getFullAXTree", request_timeout=30.0)).get("nodes", [])
+        self._ax_cache = (now, nodes)
+        return nodes
+
     async def find_all(
         self,
         role: str | None = None,
         name: str | None = None,
         *,
         limit: int | None = None,
+        fresh: bool = False,
     ) -> list[Element]:
         """AX-tree elements, filtered by exact role/name equality -- no fuzzy
         matching. Skips ignored nodes and ones without a backing DOM node."""
-        nodes = (await self.cdp("Accessibility.getFullAXTree")).get("nodes", [])
+        nodes = await self._ax_nodes(fresh=fresh)
         out: list[Element] = []
         for n in nodes:
             if n.get("ignored"):
@@ -617,7 +649,7 @@ class Browser:
         """First exact match, polling up to `timeout` seconds. None if absent."""
         deadline = time.monotonic() + timeout
         while True:
-            found = await self.find_all(role, name, limit=1)
+            found = await self.find_all(role, name, limit=1, fresh=True)
             if found:
                 return found[0]
             if time.monotonic() >= deadline:
