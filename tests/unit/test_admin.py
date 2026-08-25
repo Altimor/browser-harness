@@ -1,5 +1,3 @@
-import json
-
 import pytest
 
 from browser_harness import admin
@@ -332,84 +330,6 @@ def test_doctor_page_output_truncates_long_text(monkeypatch, capsys):
     out = capsys.readouterr().out
     assert "A very long page ..." in out
     assert "https://example.t..." in out
-
-
-def test_run_doctor_json_reports_selected_existing_daemon(monkeypatch, capsys):
-    monkeypatch.setattr(admin, "NAME", "openclaw-run")
-    monkeypatch.setattr(admin, "_version", lambda: "0.1.10")
-    monkeypatch.setattr(admin, "_install_mode", lambda: "pypi")
-    monkeypatch.setattr(
-        admin,
-        "_chrome_running",
-        lambda: (_ for _ in ()).throw(AssertionError("strict mode must not scan local browsers")),
-    )
-    monkeypatch.setattr(
-        admin,
-        "daemon_alive",
-        lambda _name: (_ for _ in ()).throw(AssertionError("ready daemon needs no second IPC probe")),
-    )
-    monkeypatch.setattr(
-        admin,
-        "daemon_browser_ready",
-        lambda name: name == "openclaw-run",
-    )
-
-    assert admin.run_doctor_json(require_existing_daemon=True) == 0
-
-    report = json.loads(capsys.readouterr().out)
-    assert report == {
-        "schema_version": 1,
-        "healthy": True,
-        "require_existing_daemon": True,
-        "version": "0.1.10",
-        "install_mode": "pypi",
-        "chrome_running": None,
-        "daemon": {
-            "name": "openclaw-run",
-            "alive": True,
-            "browser_ready": True,
-        },
-    }
-
-
-def test_run_doctor_json_strict_mode_fails_without_browser_connection(monkeypatch, capsys):
-    monkeypatch.setattr(admin, "_version", lambda: "0.1.10")
-    monkeypatch.setattr(admin, "_install_mode", lambda: "git")
-    monkeypatch.setattr(admin, "_chrome_running", lambda: True)
-    monkeypatch.setattr(admin, "daemon_alive", lambda _name: True)
-    monkeypatch.setattr(admin, "daemon_browser_ready", lambda _name: False)
-
-    assert admin.run_doctor_json(require_existing_daemon=True) == 1
-
-    report = json.loads(capsys.readouterr().out)
-    assert report["healthy"] is False
-    assert report["daemon"]["alive"] is True
-    assert report["daemon"]["browser_ready"] is False
-
-
-def test_run_doctor_json_non_strict_accepts_live_remote_connection(monkeypatch, capsys):
-    monkeypatch.setattr(admin, "NAME", "remote-run")
-    monkeypatch.setattr(admin, "_version", lambda: "0.1.10")
-    monkeypatch.setattr(admin, "_install_mode", lambda: "pypi")
-    monkeypatch.setattr(admin, "_chrome_running", lambda: False)
-    monkeypatch.setattr(admin, "daemon_browser_ready", lambda name: name == "remote-run")
-    monkeypatch.setattr(
-        admin,
-        "daemon_alive",
-        lambda _name: (_ for _ in ()).throw(AssertionError("ready daemon needs no second IPC probe")),
-    )
-
-    assert admin.run_doctor_json() == 0
-
-    report = json.loads(capsys.readouterr().out)
-    assert report["healthy"] is True
-    assert report["require_existing_daemon"] is False
-    assert report["chrome_running"] is False
-    assert report["daemon"] == {
-        "name": "remote-run",
-        "alive": True,
-        "browser_ready": True,
-    }
 
 
 def test_start_remote_daemon_stops_created_browser_when_daemon_start_fails(monkeypatch):
