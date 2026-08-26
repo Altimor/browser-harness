@@ -19,6 +19,7 @@ from .admin import (
     list_cloud_profiles,
     list_local_profiles,
     print_update_banner,
+    require_existing_daemon,
     restart_daemon,
     run_doctor,
     run_doctor_fix_snap,
@@ -380,16 +381,20 @@ def _run(args):
     # or BU_CDP_WS also blocks the spawn so we honour the precedence install.md promises.
     cloud_admin = code.lstrip().startswith(("start_remote_daemon(", "stop_remote_daemon("))
     if not cloud_admin:
-        if (
-            not daemon_alive()
-            and not _local_chrome_listening()
-            and not _explicit_cdp_configured()
-            and _cloud_auth_configured()
-            and os.environ.get("BU_AUTOSPAWN")
-        ):
-            start_remote_daemon(NAME)
+        require_existing = os.environ.get("BH_REQUIRE_EXISTING_DAEMON") == "1"
         try:
-            ensure_daemon()
+            if require_existing:
+                require_existing_daemon()
+            else:
+                if (
+                    not daemon_alive()
+                    and not _local_chrome_listening()
+                    and not _explicit_cdp_configured()
+                    and _cloud_auth_configured()
+                    and os.environ.get("BU_AUTOSPAWN")
+                ):
+                    start_remote_daemon(NAME)
+                ensure_daemon()
         except RuntimeError as e:
             # Setup/permission errors are instructions for calling agent
             print(f"browser-harness: {e}", file=sys.stderr)
