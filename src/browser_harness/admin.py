@@ -648,7 +648,14 @@ def _show_live_url(url):
 def _should_show_remote_live_view():
     """Whether Cloud provisioning should print and open its interactive live view."""
     raw = os.environ.get("BH_OPEN_LIVE_URL")
-    return raw is None or raw.strip().lower() not in {"0", "false", "no", "off"}
+    if raw is None:
+        return True
+    value = raw.strip().lower()
+    if value in {"0", "false", "no", "off"}:
+        return False
+    if value in {"1", "true", "yes", "on"}:
+        return True
+    raise ValueError("BH_OPEN_LIVE_URL must be one of: 1, true, yes, on, 0, false, no, off")
 
 
 def list_cloud_profiles():
@@ -702,8 +709,11 @@ def start_remote_daemon(name="remote", profileName=None, **create_kwargs):
       customProxy      — {host, port, username, password, ignoreCertErrors}.
       browserScreenWidth / browserScreenHeight, allowResizing, enableRecording.
 
-    Returns the full browser dict including `liveUrl`. Prints the liveUrl and
-    auto-opens it locally when a GUI is detected, so the user can watch along."""
+    Returns the full browser dict including `liveUrl`. By default, prints that
+    URL and opens it locally when a GUI is detected. Set BH_OPEN_LIVE_URL to
+    0, false, no, or off (case-insensitive) to suppress only those display side
+    effects; the returned URL remains present."""
+    show_live_view = _should_show_remote_live_view()
     if daemon_alive(name):
         raise RuntimeError(f"daemon {name!r} already alive -- restart_daemon({name!r}) first")
     if profileName:
@@ -725,7 +735,7 @@ def start_remote_daemon(name="remote", profileName=None, **create_kwargs):
                 [start_error, cleanup_error],
             )
         raise
-    if _should_show_remote_live_view():
+    if show_live_view:
         _show_live_url(browser.get("liveUrl"))
     return browser
 

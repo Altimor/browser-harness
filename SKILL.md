@@ -168,6 +168,8 @@ If you get stuck on a browser mechanic, check https://github.com/browser-use/bro
 - Keep the connection model simple: use the default daemon, `BU_NAME`, `BU_CDP_URL`, `BU_CDP_WS`, or `start_remote_daemon(...)`.
 - Trusted orchestrators can set `BH_OPEN_LIVE_URL=0` while provisioning a Cloud
   daemon to keep its interactive live-view URL from being printed or opened.
+  The URL is still created and returned by `start_remote_daemon()`; callers must
+  avoid logging or serializing that returned field.
 - Trusted orchestrators that already provisioned an exact named daemon can set
   `BH_REQUIRE_EXISTING_DAEMON=1`. Each CLI call then health-checks and reuses
   that daemon or fails closed; it never auto-starts or discovers another Chrome.

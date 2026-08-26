@@ -521,6 +521,29 @@ def test_start_remote_daemon_opens_live_view_by_default(monkeypatch):
     assert shown == ["https://live.example"]
 
 
+@pytest.mark.parametrize("value", ["1", "true", "YES", " on "])
+def test_start_remote_daemon_explicit_true_values_show_live_view(monkeypatch, value):
+    shown = []
+    monkeypatch.setenv("BH_OPEN_LIVE_URL", value)
+    monkeypatch.setattr(admin, "daemon_alive", lambda _name: False)
+    monkeypatch.setattr(
+        admin,
+        "_browser_use",
+        lambda *_args, **_kwargs: {
+            "id": "browser-123",
+            "cdpUrl": "https://cdp.example.test",
+            "liveUrl": "https://live.example",
+        },
+    )
+    monkeypatch.setattr(admin, "_cdp_ws_from_url", lambda _url: "wss://cdp.example.test/ws")
+    monkeypatch.setattr(admin, "ensure_daemon", lambda **_kwargs: None)
+    monkeypatch.setattr(admin, "_show_live_url", shown.append)
+
+    admin.start_remote_daemon("scoped")
+
+    assert shown == ["https://live.example"]
+
+
 @pytest.mark.parametrize("value", ["0", "false", "NO", " off "])
 def test_start_remote_daemon_can_suppress_live_view_for_orchestrators(monkeypatch, value):
     monkeypatch.setenv("BH_OPEN_LIVE_URL", value)
@@ -543,6 +566,19 @@ def test_start_remote_daemon_can_suppress_live_view_for_orchestrators(monkeypatc
     )
 
     admin.start_remote_daemon("scoped")
+
+
+@pytest.mark.parametrize("value", ["", "maybe", "2"])
+def test_invalid_live_view_setting_fails_before_cloud_provisioning(monkeypatch, value):
+    monkeypatch.setenv("BH_OPEN_LIVE_URL", value)
+    monkeypatch.setattr(
+        admin,
+        "_browser_use",
+        lambda *_args, **_kwargs: pytest.fail("invalid setting must fail before provisioning"),
+    )
+
+    with pytest.raises(ValueError, match="BH_OPEN_LIVE_URL must be one of"):
+        admin.start_remote_daemon("scoped")
 
 
 # --- restart_daemon: PID-reuse safety ---
