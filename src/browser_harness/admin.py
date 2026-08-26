@@ -353,10 +353,14 @@ def ensure_daemon(wait=60.0, name=None, env=None):
             except Exception:
                 pass
             if not last: time.sleep(0.5)
-        if daemon_browser_kind(name) == "cloud":
+        browser_kind = daemon_browser_kind(name)
+        if browser_kind in {"cloud", None}:
             # A stale Cloud daemon still owns a billable browser. Its shutdown
             # handler stops that browser before acknowledging, and stays alive
-            # when the Cloud stop fails so a later call can retry cleanup.
+            # when the Cloud stop fails so a later call can retry cleanup. Treat
+            # an unknown kind the same way: the health failure that made the
+            # daemon stale may also prevent classification, and replacing an
+            # unclassified daemon best-effort could orphan a Cloud browser.
             stop_remote_daemon(name or NAME)
         else:
             restart_daemon(name)

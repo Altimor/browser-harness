@@ -94,6 +94,9 @@ LOCAL_HANDSHAKE_TIMEOUT = 45
 # How long get_ws_url() keeps waiting for DevToolsActivePort before giving up
 NO_TOGGLE_GRACE = 3
 TOGGLE_BOOT_GRACE = 12
+# Cancellation should make an in-flight CDP call finish immediately. Keep the
+# drain bounded anyway so shutdown fails closed if a client ignores cancellation.
+RECOVERY_CANCEL_DRAIN_TIMEOUT = 2
 
 
 def _devtools_port_live(base):
@@ -391,6 +394,7 @@ class Daemon:
         self._dedicated_target_lock = asyncio.Lock()
         self._session_state_lock = asyncio.Lock()
         self._active_recoveries = 0
+        self._recovery_tasks = set()
         self._recoveries_idle = asyncio.Event()
         self._recoveries_idle.set()
         self._shutting_down = False
@@ -535,6 +539,41 @@ class Daemon:
         while len(self._session_replacements) > 32:
             self._session_replacements.pop(next(iter(self._session_replacements)))
 
+    def _begin_recovery(self):
+        """Register the current IPC handler unless shutdown has started."""
+        if self._shutting_down:
+            return None
+        task = asyncio.current_task()
+        if task is None:
+            return None
+        self._recovery_tasks.add(task)
+        self._active_recoveries += 1
+        self._recoveries_idle.clear()
+        return task
+
+    def _finish_recovery(self, task):
+        self._recovery_tasks.discard(task)
+        self._active_recoveries -= 1
+        if self._active_recoveries == 0:
+            self._recoveries_idle.set()
+
+    async def _cancel_and_drain_recoveries(self):
+        """Cancel active stale-session handlers and wait a bounded time."""
+        current = asyncio.current_task()
+        tasks = [
+            task for task in self._recovery_tasks
+            if task is not current and not task.done()
+        ]
+        for task in tasks:
+            task.cancel()
+        if tasks:
+            _done, pending = await asyncio.wait(
+                tasks, timeout=RECOVERY_CANCEL_DRAIN_TIMEOUT
+            )
+            if pending:
+                return False
+        return self._recoveries_idle.is_set()
+
     async def start(self):
         self.stop = asyncio.Event()
         url = get_ws_url()
@@ -655,14 +694,17 @@ class Daemon:
             return {"session_id": new_session}
         if meta == "pending_dialog": return {"dialog": self.dialog}
         if meta == "shutdown":
-            # Stop new stale-session recovery before waiting for recovery that
-            # is already in flight. Otherwise serve() can close a replacement
-            # dedicated tab while its handler is still attaching/retrying it.
-            async with self._session_state_lock:
-                if self._shutting_down:
-                    return {"error": "shutdown already in progress"}
-                self._shutting_down = True
-            await self._recoveries_idle.wait()
+            # Flip the barrier synchronously with recovery registration, then
+            # cancel/drain existing handlers. In particular, a CDP replay that
+            # never answers must not prevent Cloud cleanup from being attempted.
+            if self._shutting_down:
+                return {"error": "shutdown already in progress"}
+            self._shutting_down = True
+            if not await self._cancel_and_drain_recoveries():
+                # Preserve the daemon as a retryable cleanup authority. The
+                # strict caller will leave its endpoint and PID file intact.
+                self._shutting_down = False
+                return {"error": "stale-session recovery did not stop"}
             try:
                 stop_remote(strict=True)
             except Exception as e:
@@ -688,15 +730,14 @@ class Daemon:
                 # silently redirect them to the daemon's current tab.
                 if req.get("session_id"):
                     return {"error": msg}
-                recovery_started = False
+                recovery_task = self._begin_recovery()
+                if recovery_task is None:
+                    return {"error": "daemon is shutting down"}
                 try:
                     recovered_here = False
                     async with self._session_state_lock:
                         if self._shutting_down:
                             return {"error": "daemon is shutting down"}
-                        self._active_recoveries += 1
-                        self._recoveries_idle.clear()
-                        recovery_started = True
                         replacement_session = self._session_replacements.get(sid)
                         if replacement_session is None and sid == self.session:
                             log(f"stale session {sid}, re-attaching")
@@ -719,11 +760,7 @@ class Daemon:
                         except Exception as retry_error:
                             return {"error": str(retry_error)}
                 finally:
-                    if recovery_started:
-                        async with self._session_state_lock:
-                            self._active_recoveries -= 1
-                            if self._active_recoveries == 0:
-                                self._recoveries_idle.set()
+                    self._finish_recovery(recovery_task)
             return {"error": msg}
 
 
@@ -759,24 +796,26 @@ async def serve(d):
             except (asyncio.CancelledError, Exception): pass
         # A server crash/cancellation does not pass through meta=shutdown.
         # Establish the same recovery barrier before touching owned targets.
-        async with d._session_state_lock:
-            d._shutting_down = True
-        await d._recoveries_idle.wait()
+        d._shutting_down = True
+        recoveries_drained = await d._cancel_and_drain_recoveries()
         # Named non-cloud daemons create one dedicated background tab. Shutdown
         # has blocked new recovery and drained active recovery before setting
         # d.stop (or finalization established the barrier after a server crash).
         # Take the same locks, in the same order as recovery, so cleanup closes
         # exactly the final daemon-owned target and never races creation.
-        async with d._session_state_lock:
-            async with d._dedicated_target_lock:
-                if d.dedicated_target_id and d.cdp:
-                    try:
-                        await d.cdp.send_raw(
-                            "Target.closeTarget", {"targetId": d.dedicated_target_id}
-                        )
-                        d.dedicated_target_id = None
-                    except Exception as e:
-                        log(f"close dedicated tab on shutdown: {e}")
+        if recoveries_drained:
+            async with d._session_state_lock:
+                async with d._dedicated_target_lock:
+                    if d.dedicated_target_id and d.cdp:
+                        try:
+                            await d.cdp.send_raw(
+                                "Target.closeTarget", {"targetId": d.dedicated_target_id}
+                            )
+                            d.dedicated_target_id = None
+                        except Exception as e:
+                            log(f"close dedicated tab on shutdown: {e}")
+        else:
+            log("skip dedicated-tab cleanup: stale-session recovery did not stop")
         ipc.cleanup_endpoint(NAME)
 
 
