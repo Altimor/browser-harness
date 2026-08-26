@@ -44,6 +44,14 @@ def tmp_dir() -> Path:
     return ensure_private_dir(Path(raw).expanduser().resolve() if raw else home_dir() / "tmp")
 
 
+def extension_dir() -> Path:
+    """Stable home for the unpacked tab-group extension. Chrome remembers the
+    path a user loaded, and site-packages embeds the Python version -- loading
+    from there would break on every interpreter bump."""
+    raw = os.environ.get("BH_EXTENSION_DIR")
+    return ensure_private_dir(Path(raw).expanduser().resolve() if raw else home_dir() / "extension")
+
+
 def workspace_dir() -> Path:
     raw = os.environ.get("BH_AGENT_WORKSPACE")
     return ensure_private_dir(Path(raw).expanduser().resolve() if raw else home_dir() / "agent-workspace")

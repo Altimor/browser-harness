@@ -291,6 +291,13 @@ def _mark_tab():
     try: cdp("Runtime.evaluate", expression="if(!document.title.startsWith('\U0001F434'))document.title='\U0001F434 '+document.title")
     except Exception: pass
 
+def _remark_tab():
+    """Force a title change so the extension's onUpdated names this exact tab."""
+    try: cdp("Runtime.evaluate", expression=(
+        "document.title=document.title.replace(/^\U0001F434 /,'');"
+        "document.title='\U0001F434 '+document.title"))
+    except Exception: pass
+
 def _target_id(target):
     """Accept a raw target id or a tab dict returned by the helpers."""
     return (target.get("targetId") or target.get("target_id")) if isinstance(target, dict) else target
@@ -323,6 +330,7 @@ def switch_tab(target, activate=False):
     sid = cdp("Target.attachToTarget", targetId=target_id, flatten=True)["sessionId"]
     _send({"meta": "set_session", "session_id": sid, "target_id": target_id})
     _mark_tab()
+    _auto_group()
     return sid
 
 def new_tab(url="about:blank"):
@@ -356,6 +364,135 @@ def close_tab(target=None):
     if target_id is None:
         target_id = current_tab()["targetId"]
     cdp("Target.closeTarget", targetId=target_id)
+
+
+# --- tab groups ---------------------------------------------------------------
+# CDP has no tab-group API at all (no command, no Target.createTarget param), so
+# grouping goes through the bundled extension in extension/. Everything here
+# degrades to a no-op when it isn't loaded -- grouping is a nicety, never a
+# reason to fail a task.
+
+EXTENSION_SRC = CORE_DIR / "extension"
+EXTENSION_DIR = paths.extension_dir()
+EXTENSION_NAME = "Browser Use"
+
+
+_synced = []
+
+
+def _sync_extension():
+    """Mirror the packaged extension to EXTENSION_DIR. Keeps the path a user
+    loaded valid across upgrades, and carries new versions in place."""
+    if _synced:
+        return EXTENSION_DIR
+    _synced.append(True)
+    try:
+        for f in EXTENSION_SRC.rglob("*"):
+            if not f.is_file():
+                continue
+            dst = EXTENSION_DIR / f.relative_to(EXTENSION_SRC)
+            data = f.read_bytes()
+            if not dst.exists() or dst.read_bytes() != data:
+                dst.parent.mkdir(parents=True, exist_ok=True)
+                dst.write_bytes(data)
+    except Exception:
+        pass
+    return EXTENSION_DIR
+TAB_GROUP_COLORS = ("grey", "blue", "red", "yellow", "green", "pink", "purple", "cyan", "orange")
+_TAB_GROUP = {"warned": False}
+
+
+def _task_group(label=..., color=None):
+    """Read (or set) the task group. Kept in the daemon so it survives across CLI
+    calls -- helper module state resets on every invocation."""
+    req = {"meta": "task_group"}
+    if label is not ...:
+        req["label"] = label
+        req["color"] = color
+    try:
+        r = _send(req)
+    except Exception:
+        r = {}
+    return (r.get("label") or os.environ.get("BH_TAB_GROUP") or None), (r.get("color") or "blue")
+
+
+def _extension_session():
+    """CDP session on the extension's service worker, or None if it isn't loaded."""
+    for t in cdp("Target.getTargets").get("targetInfos", []):
+        if t.get("type") != "service_worker" or not t.get("url", "").startswith("chrome-extension://"):
+            continue
+        try:
+            sid = cdp("Target.attachToTarget", targetId=t["targetId"], flatten=True)["sessionId"]
+            # Probe for our API rather than the manifest name: a rename can't
+            # break it, and a same-named extension can't be mistaken for us.
+            r = cdp("Runtime.evaluate", session_id=sid, returnByValue=True,
+                    expression="typeof self.bhGroupClaimed")
+            if r.get("result", {}).get("value") == "function":
+                return sid
+        except Exception:
+            continue
+    return None
+
+
+def set_task_group(label, color="blue"):
+    """Name the tab group that tabs opened or driven from now on land in.
+
+    Keep the label short -- Chrome's tab-strip chip truncates it (~3 words). Pass
+    label=None to stop grouping. Returns True if grouping is actually available.
+    """
+    if color not in TAB_GROUP_COLORS:
+        raise ValueError(f"color must be one of {TAB_GROUP_COLORS}")
+    if label is not None:
+        label = " ".join(str(label).split())
+    _task_group(label or None, color)
+    _TAB_GROUP["warned"] = False
+    if label is None:
+        return True
+    return group_tab()
+
+
+def group_tab(label=None, color=None):
+    """Put the tab the agent is driving into its task group. No-op when unavailable."""
+    saved, saved_color = _task_group()
+    label = label or saved
+    if not label:
+        return False
+    color = color or saved_color
+    _sync_extension()  # keep the loaded path carrying the current version
+    sid = _extension_session()
+    if sid is None:
+        if not _TAB_GROUP["warned"]:
+            _TAB_GROUP["warned"] = True
+            print(f"browser-harness: tab grouping is off -- load {EXTENSION_DIR} at "
+                  "chrome://extensions (Developer mode -> Load unpacked).", file=sys.stderr)
+        return False
+    args = f"{json.dumps(label)}, {json.dumps(color)}"
+    out = {}
+    try:
+        cdp("Runtime.evaluate", session_id=sid, returnByValue=True, expression="self.bhBeginClaim()")
+        _remark_tab()  # fires the onUpdated the claim above is listening for
+        for delay in (0.05, 0.2, 0.4):  # chrome.tabs lags the CDP title write
+            time.sleep(delay)
+            r = cdp("Runtime.evaluate", session_id=sid, returnByValue=True, awaitPromise=True,
+                    expression=f"self.bhGroupClaimed({args})")
+            out = r.get("result", {}).get("value") or {}
+            if out.get("ok") or out.get("reason") not in ("no-claim", "ambiguous"):
+                break
+    except Exception as e:
+        out = {"ok": False, "reason": str(e)}
+    if not out.get("ok") and not _TAB_GROUP["warned"]:
+        _TAB_GROUP["warned"] = True
+        print(f"browser-harness: tab grouping unavailable ({out.get('reason')}); continuing ungrouped.",
+              file=sys.stderr)
+    return bool(out.get("ok"))
+
+
+def _auto_group():
+    try:
+        if _task_group()[0]:
+            group_tab()
+    except Exception:
+        pass
 
 
 def ensure_real_tab():

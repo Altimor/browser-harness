@@ -373,6 +373,10 @@ class Daemon:
         self.cdp = None
         self.session = None
         self.target_id = None
+        # tab-group label lives here: every CLI call is a fresh process, so module
+        # state would reset between task steps
+        self.task_group = None
+        self.task_group_color = "blue"
         self.dedicated_target_id = None
         self._dedicated_target_lock = asyncio.Lock()
         self._session_state_lock = asyncio.Lock()
@@ -571,6 +575,11 @@ class Daemon:
             out = list(self.events); self.events.clear()
             return {"events": out}
         if meta == "session":     return {"session_id": self.session}
+        if meta == "task_group":
+            if "label" in req:
+                self.task_group = req.get("label")
+                self.task_group_color = req.get("color") or "blue"
+            return {"label": self.task_group, "color": self.task_group_color}
         if meta == "current_tab":
             # Resolve the attached page's target info server-side. Helpers can't
             # send Target.getTargetInfo themselves: daemon strips session_id for

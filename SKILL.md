@@ -31,6 +31,14 @@ PY
   background; call `activate_tab(target)` only when the user explicitly asks
   or a page demonstrably pauses rendering while hidden.
 - The normal local flow attaches to the running Chrome/Chromium CDP endpoint. No browser ids or local profile selection.
+- Call `set_task_group("Short Label")` once at the start of a task. Every tab you
+  open or attach to after that lands in a Chrome tab group with that label, so the
+  user can tell your tabs from theirs. The label lives in the daemon, so it holds
+  across separate CLI calls until you change it or clear it with
+  `set_task_group(None)`. Keep it to ~3 words -- the tab-strip chip truncates.
+  One group per window (Chrome groups can't span windows). It no-ops (with one
+  warning) when the extension isn't loaded, so it never fails a task. See
+  "Tab Groups" in `install.md`.
 
 ## Local Chrome
 

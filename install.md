@@ -65,6 +65,39 @@ Chrome setup step; it is not exposed to the harness until CDP is available.
 The helper requires Accessibility permission for the app launching the CLI
 (for example Terminal, iTerm, Codex, or an IDE) in System Settings.
 
+## Tab Groups
+
+Optional. Lets the harness put agent-driven tabs in a labeled Chrome tab group
+so they are visually separate from the user's own tabs.
+
+Chrome exposes no way to create or name a tab group over CDP -- `chrome.tabs.group()`
+is extension-only -- so this ships as a small unpacked extension. On branded
+Chrome both automatic install paths are closed (`Extensions.loadUnpacked` answers
+`Method not available`, and `--load-extension` is refused), so it is a one-time
+manual load that then persists:
+
+1. Open `chrome://extensions` and turn on **Developer mode**.
+2. **Load unpacked** -> select the directory printed by:
+
+   ```bash
+   browser-harness <<'PY'
+   print(EXTENSION_DIR)
+   PY
+   ```
+
+   That is a stable path under the harness config dir (not site-packages, whose
+   path embeds the Python version). Upgrades refresh it in place, so the load is
+   genuinely one-time.
+
+It appears in `chrome://extensions` as **Browser Use**. It requests only `tabs`,
+`tabGroups`, and `alarms` -- no host permissions, so it cannot read page content.
+
+Then call `set_task_group("Short Label")` at the start of a task. Without the
+extension the call warns once and returns `False`; automation continues ungrouped.
+
+Chromium forks vary -- some (for example Dia) reject grouping even with the
+extension loaded. The harness detects that and degrades to ungrouped tabs.
+
 ## Cloud Browsers
 
 Cloud is optional. Local Chrome does not need a Browser Use API key.
