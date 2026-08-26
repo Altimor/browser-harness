@@ -1,3 +1,6 @@
+import signal
+from pathlib import Path
+
 import pytest
 
 from browser_harness import admin
@@ -18,6 +21,48 @@ class FakeSocket:
 
     def close(self):
         self.closed = True
+
+
+class FakeProcess:
+    def __init__(self, pid=123, returncode=None):
+        self.pid = pid
+        self.returncode = returncode
+        self.terminated = False
+
+    def poll(self):
+        return self.returncode
+
+    def terminate(self):
+        self.terminated = True
+
+
+def test_cleanup_unattached_browser_launch_stops_posix_process_group(monkeypatch):
+    process = FakeProcess()
+    killed = []
+    monkeypatch.setattr(admin.ipc, "IS_WINDOWS", False)
+    monkeypatch.setattr("browser_harness.daemon._devtools_port_live", lambda _profile: False)
+    monkeypatch.setattr(admin.os, "killpg", lambda pid, sig: killed.append((pid, sig)))
+
+    admin._cleanup_unattached_browser_launch((process, Path("/profile")))
+
+    assert killed == [(123, signal.SIGTERM)]
+
+
+def test_cleanup_unattached_browser_launch_keeps_cdp_browser(monkeypatch):
+    process = FakeProcess()
+    monkeypatch.setattr("browser_harness.daemon._devtools_port_live", lambda _profile: True)
+    monkeypatch.setattr(admin.os, "killpg", lambda _pid, _sig: pytest.fail("must keep the attached browser"))
+
+    admin._cleanup_unattached_browser_launch((process, Path("/profile")))
+
+
+def test_cleanup_unattached_browser_launch_ignores_unowned_launch(monkeypatch):
+    monkeypatch.setattr(
+        "browser_harness.daemon._devtools_port_live",
+        lambda _profile: pytest.fail("must not probe an unowned launch"),
+    )
+
+    admin._cleanup_unattached_browser_launch((None, Path("/profile")))
 
 
 @pytest.mark.parametrize("value", ["0", "false", "NO", " off "])

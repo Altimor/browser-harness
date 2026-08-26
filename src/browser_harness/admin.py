@@ -367,7 +367,7 @@ def ensure_daemon(wait=60.0, name=None, env=None):
 
     import subprocess, sys
     local = _is_local_chrome_mode(env)
-    launched_browser = False
+    launched_browser = None
     opened_inspect = False
     for _ in range(3):
         e = {**os.environ, **({"BU_NAME": name} if name else {}), **(env or {})}
@@ -385,7 +385,9 @@ def ensure_daemon(wait=60.0, name=None, env=None):
         deadline = spawned + wait
         hinted = not local
         while time.time() < deadline:
-            if daemon_alive(name): return
+            if daemon_alive(name):
+                _cleanup_unattached_browser_launch(launched_browser)
+                return
             if p.poll() is not None: break
             if not hinted and time.time() - spawned > 2 and (_log_tail(name) or "").startswith("handshake-wait"):
                 action = (
@@ -411,11 +413,11 @@ def ensure_daemon(wait=60.0, name=None, env=None):
             raise RuntimeError(
                 "permission-blocked: wait for the user to click Allow in the Chrome permission popup before retrying."
             )
-        if local and not launched_browser and _chrome_not_running(msg):
+        if local and launched_browser is None and _chrome_not_running(msg):
             # Chrome is closed — launch the browser and retry
-            launched_browser = True
             restart_daemon(name)
-            if not _launch_browser():
+            launched_browser = _launch_browser()
+            if launched_browser is None:
                 raise RuntimeError(
                     "chrome-not-running: no supported browser is running and none could be launched -- ask the user to open Chrome, then retry."
                 )
@@ -953,7 +955,13 @@ def _profile_directory_args(base):
 
 
 def _launch_browser():
-    """Prefers the browser whose profile already has perm box checked"""
+    """Prefers the browser whose profile already has perm box checked.
+
+    Returns ``(process, profile)`` on success. ``process`` is available only
+    when we launched the browser directly; ``profile`` is the user-data dir we
+    expect that browser to use. The caller uses both to clean up a direct
+    launch that never becomes reachable over CDP.
+    """
     import platform, shutil, subprocess
     from .daemon import PROFILES, remote_debugging_toggle_profiles
 
@@ -961,11 +969,11 @@ def _launch_browser():
         raw = (os.environ.get(key) or "").strip()
         if raw and Path(raw).expanduser().is_file():
             try:
-                subprocess.Popen(
+                process = subprocess.Popen(
                     [str(Path(raw).expanduser())],
                     stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, **ipc.spawn_kwargs(),
                 )
-                return True
+                return process, None
             except (OSError, subprocess.SubprocessError):
                 # A path that exists but can't execute (permissions, wrong arch)
                 # must fall through to normal discovery, not abort
@@ -983,19 +991,48 @@ def _launch_browser():
             if r.returncode != 0 and mac_app != "Google Chrome":
                 # Different app → its profile dir may not match; launch plain
                 r = subprocess.run(["open", "-a", "Google Chrome"], timeout=10, check=False, capture_output=True)
-            return r.returncode == 0
+            return (None, base) if r.returncode == 0 else None
         if system == "Windows":
             # `start <name>` resolves browsers via App Paths without knowing the install dir
             subprocess.Popen(["cmd", "/c", "start", "", win_target or "chrome"] + profile_args, **ipc.spawn_kwargs())
-            return True
+            return None, base
         for cmd in posix_cmds or _DEFAULT_LAUNCH[1]:
             w = shutil.which(cmd)
             if w:
-                subprocess.Popen([w] + profile_args, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, **ipc.spawn_kwargs())
-                return True
-        return False
+                process = subprocess.Popen(
+                    [w] + profile_args,
+                    stdout=subprocess.DEVNULL,
+                    stderr=subprocess.DEVNULL,
+                    **ipc.spawn_kwargs(),
+                )
+                return process, base
+        return None
     except (OSError, subprocess.SubprocessError):
-        return False
+        return None
+
+
+def _cleanup_unattached_browser_launch(launch):
+    """Stop a browser we launched when the daemon attached somewhere else."""
+    if not launch:
+        return
+    process, profile = launch
+    if process is None or profile is None or process.poll() is not None:
+        return
+
+    from .daemon import _devtools_port_live
+
+    if _devtools_port_live(profile):
+        return
+
+    import signal
+
+    try:
+        if ipc.IS_WINDOWS:
+            process.terminate()
+        else:
+            os.killpg(process.pid, signal.SIGTERM)
+    except (OSError, subprocess.SubprocessError):
+        pass
 
 
 def _open_chrome_inspect():
