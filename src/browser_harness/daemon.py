@@ -390,6 +390,10 @@ class Daemon:
         self.dedicated_target_id = None
         self._dedicated_target_lock = asyncio.Lock()
         self._session_state_lock = asyncio.Lock()
+        self._active_recoveries = 0
+        self._recoveries_idle = asyncio.Event()
+        self._recoveries_idle.set()
+        self._shutting_down = False
         self._session_replacements = {}
         self.events = deque(maxlen=BUF)
         self.dialog = None
@@ -651,9 +655,21 @@ class Daemon:
             return {"session_id": new_session}
         if meta == "pending_dialog": return {"dialog": self.dialog}
         if meta == "shutdown":
+            # Stop new stale-session recovery before waiting for recovery that
+            # is already in flight. Otherwise serve() can close a replacement
+            # dedicated tab while its handler is still attaching/retrying it.
+            async with self._session_state_lock:
+                if self._shutting_down:
+                    return {"error": "shutdown already in progress"}
+                self._shutting_down = True
+            await self._recoveries_idle.wait()
             try:
                 stop_remote(strict=True)
             except Exception as e:
+                # A failed Cloud stop must leave the daemon usable so a later
+                # shutdown request can retry the billable-browser cleanup.
+                async with self._session_state_lock:
+                    self._shutting_down = False
                 return {"error": str(e)}
             self.stop.set()
             return {"ok": True}
@@ -672,29 +688,42 @@ class Daemon:
                 # silently redirect them to the daemon's current tab.
                 if req.get("session_id"):
                     return {"error": msg}
-                recovered_here = False
-                async with self._session_state_lock:
-                    replacement_session = self._session_replacements.get(sid)
-                    if replacement_session is None and sid == self.session:
-                        log(f"stale session {sid}, re-attaching")
-                        if not await self.attach_first_page(
-                            replaces_session=sid, enable_domains=False
-                        ):
-                            return {"error": msg}
+                recovery_started = False
+                try:
+                    recovered_here = False
+                    async with self._session_state_lock:
+                        if self._shutting_down:
+                            return {"error": "daemon is shutting down"}
+                        self._active_recoveries += 1
+                        self._recoveries_idle.clear()
+                        recovery_started = True
                         replacement_session = self._session_replacements.get(sid)
-                        recovered_here = replacement_session is not None
-                if recovered_here:
-                    await self._enable_default_domains(replacement_session)
-                # Retry only on a session known to replace this exact stale
-                # session. self.session may instead have changed because the
-                # user deliberately switched tabs while this request waited.
-                if replacement_session:
-                    try:
-                        return {"result": await self.cdp.send_raw(
-                            method, params, session_id=replacement_session
-                        )}
-                    except Exception as retry_error:
-                        return {"error": str(retry_error)}
+                        if replacement_session is None and sid == self.session:
+                            log(f"stale session {sid}, re-attaching")
+                            if not await self.attach_first_page(
+                                replaces_session=sid, enable_domains=False
+                            ):
+                                return {"error": msg}
+                            replacement_session = self._session_replacements.get(sid)
+                            recovered_here = replacement_session is not None
+                    if recovered_here:
+                        await self._enable_default_domains(replacement_session)
+                    # Retry only on a session known to replace this exact stale
+                    # session. self.session may instead have changed because the
+                    # user deliberately switched tabs while this request waited.
+                    if replacement_session:
+                        try:
+                            return {"result": await self.cdp.send_raw(
+                                method, params, session_id=replacement_session
+                            )}
+                        except Exception as retry_error:
+                            return {"error": str(retry_error)}
+                finally:
+                    if recovery_started:
+                        async with self._session_state_lock:
+                            self._active_recoveries -= 1
+                            if self._active_recoveries == 0:
+                                self._recoveries_idle.set()
             return {"error": msg}
 
 
@@ -728,16 +757,26 @@ async def serve(d):
             t.cancel()
             try: await t
             except (asyncio.CancelledError, Exception): pass
-        # Named non-cloud daemons create one dedicated background tab. Close
-        # only that owned tab on shutdown; never close a user-selected tab.
-        if d.dedicated_target_id and d.cdp:
-            try:
-                await d.cdp.send_raw(
-                    "Target.closeTarget", {"targetId": d.dedicated_target_id}
-                )
-                d.dedicated_target_id = None
-            except Exception as e:
-                log(f"close dedicated tab on shutdown: {e}")
+        # A server crash/cancellation does not pass through meta=shutdown.
+        # Establish the same recovery barrier before touching owned targets.
+        async with d._session_state_lock:
+            d._shutting_down = True
+        await d._recoveries_idle.wait()
+        # Named non-cloud daemons create one dedicated background tab. Shutdown
+        # has blocked new recovery and drained active recovery before setting
+        # d.stop (or finalization established the barrier after a server crash).
+        # Take the same locks, in the same order as recovery, so cleanup closes
+        # exactly the final daemon-owned target and never races creation.
+        async with d._session_state_lock:
+            async with d._dedicated_target_lock:
+                if d.dedicated_target_id and d.cdp:
+                    try:
+                        await d.cdp.send_raw(
+                            "Target.closeTarget", {"targetId": d.dedicated_target_id}
+                        )
+                        d.dedicated_target_id = None
+                    except Exception as e:
+                        log(f"close dedicated tab on shutdown: {e}")
         ipc.cleanup_endpoint(NAME)
 
 

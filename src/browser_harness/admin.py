@@ -353,7 +353,13 @@ def ensure_daemon(wait=60.0, name=None, env=None):
             except Exception:
                 pass
             if not last: time.sleep(0.5)
-        restart_daemon(name)
+        if daemon_browser_kind(name) == "cloud":
+            # A stale Cloud daemon still owns a billable browser. Its shutdown
+            # handler stops that browser before acknowledging, and stays alive
+            # when the Cloud stop fails so a later call can retry cleanup.
+            stop_remote_daemon(name or NAME)
+        else:
+            restart_daemon(name)
 
     import subprocess, sys
     local = _is_local_chrome_mode(env)
@@ -484,6 +490,9 @@ def restart_daemon(name=None, require_clean=False):
     `browser-harness` invocation, which auto-spawns a fresh daemon via
     ensure_daemon(). The function itself only stops.
 
+    With require_clean=True, an unavailable daemon or any response other than
+    {"ok": true} raises before endpoint cleanup or process termination.
+
     Identity is verified via ipc.identify() before any process signal, so
     a stale pid file whose number has been reused by an unrelated process
     is never SIGTERM'd. If the daemon is unreachable, we just clean up the
@@ -504,6 +513,8 @@ def restart_daemon(name=None, require_clean=False):
     #     while the process stayed alive.
     daemon_pid = ipc.identify(name, timeout=5.0)
     daemon_alive = daemon_pid is not None or ipc.ping(name, timeout=1.0)
+    if require_clean and not daemon_alive:
+        raise RuntimeError(f"daemon {name!r} is unavailable for required clean shutdown")
     # Snapshot the daemon's process start-time as a secondary identity check.
     # The IPC socket can disappear before the process exits (e.g. the shutdown
     # path tears down the socket and then waits on a slow remote `stop` PATCH),
@@ -518,11 +529,20 @@ def restart_daemon(name=None, require_clean=False):
         try:
             c, token = ipc.connect(name, timeout=50.0 if require_clean else 5.0)
             response = ipc.request(c, token, {"meta": "shutdown"})
-            if require_clean and isinstance(response, dict) and response.get("error"):
-                raise RuntimeError(response["error"])
-        except Exception:
+            if require_clean and (
+                not isinstance(response, dict)
+                or response.get("ok") is not True
+                or bool(response.get("error"))
+            ):
+                error = response.get("error") if isinstance(response, dict) else None
+                raise RuntimeError(error or f"daemon {name!r} did not confirm clean shutdown")
+        except Exception as exc:
             if require_clean:
-                raise
+                if isinstance(exc, RuntimeError):
+                    raise
+                raise RuntimeError(
+                    f"daemon {name!r} did not confirm clean shutdown: {exc}"
+                ) from exc
         finally:
             if c is not None:
                 close = getattr(c, "close", None)
