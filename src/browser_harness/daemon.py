@@ -87,12 +87,16 @@ PROFILES = profile_dirs()
 INTERNAL = ("chrome://", "chrome-untrusted://", "devtools://", "chrome-extension://", "about:")
 BU_API = "https://api.browser-use.com/api/v3"
 REMOTE_ID = os.environ.get("BU_BROWSER_ID")
+_REMOTE_STOPPED = False
 BROWSER_KIND = "cloud" if REMOTE_ID else ("cdp" if (os.environ.get("BU_CDP_WS") or os.environ.get("BU_CDP_URL")) else "local")
 # Chrome 144+ shows a per-connection popup. Keep popup open enough to click.
 LOCAL_HANDSHAKE_TIMEOUT = 45
 # How long get_ws_url() keeps waiting for DevToolsActivePort before giving up
 NO_TOGGLE_GRACE = 3
 TOGGLE_BOOT_GRACE = 12
+# Cancellation should make an in-flight CDP call finish immediately. Keep the
+# drain bounded anyway so shutdown fails closed if a client ignores cancellation.
+RECOVERY_CANCEL_DRAIN_TIMEOUT = 2
 
 
 def _devtools_port_live(base):
@@ -178,6 +182,19 @@ def supported_browser_running():
 
 def log(msg):
     open(LOG, "a", encoding="utf-8", errors="replace").write(f"{msg}\n")
+
+
+def _safe_connection_label(url):
+    """Log only endpoint topology, never CDP credentials or provider session paths."""
+    try:
+        parsed = urlparse(url)
+        if not parsed.scheme or not parsed.hostname:
+            return "<redacted-cdp-endpoint>"
+        host = f"[{parsed.hostname}]" if ":" in parsed.hostname else parsed.hostname
+        port = f":{parsed.port}" if parsed.port else ""
+        return f"{parsed.scheme}://{host}{port}"
+    except (TypeError, ValueError):
+        return "<redacted-cdp-endpoint>"
 
 
 async def _silent(coro):
@@ -289,21 +306,34 @@ def get_ws_url():
     raise RuntimeError(f"DevToolsActivePort not found in {[str(p) for p in PROFILES]} — enable chrome://inspect/#remote-debugging, or set BU_CDP_WS for a remote browser")
 
 
-def stop_remote():
+def stop_remote(strict=False):
+    global _REMOTE_STOPPED
     if not REMOTE_ID:
-        return
-    try:
-        key = auth.get_browser_use_api_key()
-        req = urllib.request.Request(
-            f"{BU_API}/browsers/{REMOTE_ID}",
-            data=json.dumps({"action": "stop"}).encode(),
-            method="PATCH",
-            headers={"X-Browser-Use-API-Key": key, "Content-Type": "application/json"},
-        )
-        urllib.request.urlopen(req, timeout=15).read()
-        log(f"stopped remote browser {REMOTE_ID}")
-    except Exception as e:
-        log(f"stop_remote failed ({REMOTE_ID}): {e}")
+        return True
+    if _REMOTE_STOPPED:
+        return True
+    last_error = None
+    for attempt in range(3):
+        try:
+            key = auth.get_browser_use_api_key()
+            req = urllib.request.Request(
+                f"{BU_API}/browsers/{REMOTE_ID}",
+                data=json.dumps({"action": "stop"}).encode(),
+                method="PATCH",
+                headers={"X-Browser-Use-API-Key": key, "Content-Type": "application/json"},
+            )
+            urllib.request.urlopen(req, timeout=15).read()
+            _REMOTE_STOPPED = True
+            log(f"stopped remote browser {REMOTE_ID}")
+            return True
+        except Exception as e:
+            last_error = e
+            log(f"stop_remote attempt {attempt + 1}/3 failed ({REMOTE_ID}): {e}")
+            if attempt < 2:
+                time.sleep(0.5 * (attempt + 1))
+    if strict:
+        raise RuntimeError(f"failed to stop remote browser {REMOTE_ID}: {last_error}")
+    return False
 
 
 def is_real_page(t):
@@ -363,6 +393,11 @@ class Daemon:
         self.dedicated_target_id = None
         self._dedicated_target_lock = asyncio.Lock()
         self._session_state_lock = asyncio.Lock()
+        self._active_recoveries = 0
+        self._recovery_tasks = set()
+        self._recoveries_idle = asyncio.Event()
+        self._recoveries_idle.set()
+        self._shutting_down = False
         self._session_replacements = {}
         self.events = deque(maxlen=BUF)
         self.dialog = None
@@ -504,10 +539,45 @@ class Daemon:
         while len(self._session_replacements) > 32:
             self._session_replacements.pop(next(iter(self._session_replacements)))
 
+    def _begin_recovery(self):
+        """Register the current IPC handler unless shutdown has started."""
+        if self._shutting_down:
+            return None
+        task = asyncio.current_task()
+        if task is None:
+            return None
+        self._recovery_tasks.add(task)
+        self._active_recoveries += 1
+        self._recoveries_idle.clear()
+        return task
+
+    def _finish_recovery(self, task):
+        self._recovery_tasks.discard(task)
+        self._active_recoveries -= 1
+        if self._active_recoveries == 0:
+            self._recoveries_idle.set()
+
+    async def _cancel_and_drain_recoveries(self):
+        """Cancel active stale-session handlers and wait a bounded time."""
+        current = asyncio.current_task()
+        tasks = [
+            task for task in self._recovery_tasks
+            if task is not current and not task.done()
+        ]
+        for task in tasks:
+            task.cancel()
+        if tasks:
+            _done, pending = await asyncio.wait(
+                tasks, timeout=RECOVERY_CANCEL_DRAIN_TIMEOUT
+            )
+            if pending:
+                return False
+        return self._recoveries_idle.is_set()
+
     async def start(self):
         self.stop = asyncio.Event()
         url = get_ws_url()
-        log(f"connecting to {url}")
+        log(f"connecting to {_safe_connection_label(url)}")
         self.cdp = _PatientCDPClient(url) if BROWSER_KIND == "local" else CDPClient(url)
         if BROWSER_KIND == "local":
             # Allow while this handshake is still parked on the popup
@@ -623,7 +693,28 @@ class Daemon:
             )))
             return {"session_id": new_session}
         if meta == "pending_dialog": return {"dialog": self.dialog}
-        if meta == "shutdown":    self.stop.set(); return {"ok": True}
+        if meta == "shutdown":
+            # Flip the barrier synchronously with recovery registration, then
+            # cancel/drain existing handlers. In particular, a CDP replay that
+            # never answers must not prevent Cloud cleanup from being attempted.
+            if self._shutting_down:
+                return {"error": "shutdown already in progress"}
+            self._shutting_down = True
+            if not await self._cancel_and_drain_recoveries():
+                # Preserve the daemon as a retryable cleanup authority. The
+                # strict caller will leave its endpoint and PID file intact.
+                self._shutting_down = False
+                return {"error": "stale-session recovery did not stop"}
+            try:
+                stop_remote(strict=True)
+            except Exception as e:
+                # A failed Cloud stop must leave the daemon usable so a later
+                # shutdown request can retry the billable-browser cleanup.
+                async with self._session_state_lock:
+                    self._shutting_down = False
+                return {"error": str(e)}
+            self.stop.set()
+            return {"ok": True}
 
         method = req["method"]
         params = req.get("params") or {}
@@ -639,29 +730,37 @@ class Daemon:
                 # silently redirect them to the daemon's current tab.
                 if req.get("session_id"):
                     return {"error": msg}
-                recovered_here = False
-                async with self._session_state_lock:
-                    replacement_session = self._session_replacements.get(sid)
-                    if replacement_session is None and sid == self.session:
-                        log(f"stale session {sid}, re-attaching")
-                        if not await self.attach_first_page(
-                            replaces_session=sid, enable_domains=False
-                        ):
-                            return {"error": msg}
+                recovery_task = self._begin_recovery()
+                if recovery_task is None:
+                    return {"error": "daemon is shutting down"}
+                try:
+                    recovered_here = False
+                    async with self._session_state_lock:
+                        if self._shutting_down:
+                            return {"error": "daemon is shutting down"}
                         replacement_session = self._session_replacements.get(sid)
-                        recovered_here = replacement_session is not None
-                if recovered_here:
-                    await self._enable_default_domains(replacement_session)
-                # Retry only on a session known to replace this exact stale
-                # session. self.session may instead have changed because the
-                # user deliberately switched tabs while this request waited.
-                if replacement_session:
-                    try:
-                        return {"result": await self.cdp.send_raw(
-                            method, params, session_id=replacement_session
-                        )}
-                    except Exception as retry_error:
-                        return {"error": str(retry_error)}
+                        if replacement_session is None and sid == self.session:
+                            log(f"stale session {sid}, re-attaching")
+                            if not await self.attach_first_page(
+                                replaces_session=sid, enable_domains=False
+                            ):
+                                return {"error": msg}
+                            replacement_session = self._session_replacements.get(sid)
+                            recovered_here = replacement_session is not None
+                    if recovered_here:
+                        await self._enable_default_domains(replacement_session)
+                    # Retry only on a session known to replace this exact stale
+                    # session. self.session may instead have changed because the
+                    # user deliberately switched tabs while this request waited.
+                    if replacement_session:
+                        try:
+                            return {"result": await self.cdp.send_raw(
+                                method, params, session_id=replacement_session
+                            )}
+                        except Exception as retry_error:
+                            return {"error": str(retry_error)}
+                finally:
+                    self._finish_recovery(recovery_task)
             return {"error": msg}
 
 
@@ -695,6 +794,28 @@ async def serve(d):
             t.cancel()
             try: await t
             except (asyncio.CancelledError, Exception): pass
+        # A server crash/cancellation does not pass through meta=shutdown.
+        # Establish the same recovery barrier before touching owned targets.
+        d._shutting_down = True
+        recoveries_drained = await d._cancel_and_drain_recoveries()
+        # Named non-cloud daemons create one dedicated background tab. Shutdown
+        # has blocked new recovery and drained active recovery before setting
+        # d.stop (or finalization established the barrier after a server crash).
+        # Take the same locks, in the same order as recovery, so cleanup closes
+        # exactly the final daemon-owned target and never races creation.
+        if recoveries_drained:
+            async with d._session_state_lock:
+                async with d._dedicated_target_lock:
+                    if d.dedicated_target_id and d.cdp:
+                        try:
+                            await d.cdp.send_raw(
+                                "Target.closeTarget", {"targetId": d.dedicated_target_id}
+                            )
+                            d.dedicated_target_id = None
+                        except Exception as e:
+                            log(f"close dedicated tab on shutdown: {e}")
+        else:
+            log("skip dedicated-tab cleanup: stale-session recovery did not stop")
         ipc.cleanup_endpoint(NAME)
 
 

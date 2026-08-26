@@ -98,6 +98,16 @@ Use the output:
 - `daemon alive` FAIL: Chrome remote debugging permission is missing, Chrome is closed, or the CDP endpoint is not reachable.
 - update available: run `browser-harness --update -y` when you decide to upgrade.
 
+For a machine-readable health check, an orchestrator can set `BU_NAME` to an
+already-provisioned daemon and run:
+
+```bash
+browser-harness doctor --json --require-existing-daemon
+```
+
+This prints a versioned JSON report and exits nonzero unless that exact daemon
+has a live browser connection. It never starts or discovers another browser.
+
 If this still fails, inspect `src/browser_harness/admin.py`, `src/browser_harness/daemon.py`, and `src/browser_harness/_ipc.py`.
 
 Useful:
