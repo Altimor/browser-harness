@@ -982,6 +982,7 @@ def _launch_browser():
     known_profiles = enabled + [
         base for base in PROFILES if base not in enabled and (base / "Local State").exists()
     ]
+    system = platform.system()
     for key in ("BH_CHROME_PATH", "CHROME_PATH"):
         raw = (os.environ.get(key) or "").strip()
         if raw and Path(raw).expanduser().is_file():
@@ -994,7 +995,7 @@ def _launch_browser():
                 profile = next(
                     (base for base in known_profiles if _browser_binary_matches_profile(binary, base)),
                     None,
-                )
+                ) if system not in ("Darwin", "Windows") else None
                 return process, profile
             except (OSError, subprocess.SubprocessError):
                 # A path that exists but can't execute (permissions, wrong arch)
@@ -1005,7 +1006,6 @@ def _launch_browser():
     mac_app, posix_cmds, win_target = _browser_launch_spec(base) if base else _DEFAULT_LAUNCH
     profile_args = _profile_directory_args(base)
     try:
-        system = platform.system()
         if system == "Darwin":
             cmd = ["open", "-a", mac_app] + (["--args"] + profile_args if profile_args else [])
             r = subprocess.run(cmd, timeout=10, check=False, capture_output=True)
