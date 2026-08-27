@@ -1,3 +1,6 @@
+import signal
+from pathlib import Path
+
 import pytest
 
 from browser_harness import admin
@@ -18,6 +21,117 @@ class FakeSocket:
 
     def close(self):
         self.closed = True
+
+
+class FakeProcess:
+    def __init__(self, pid=123, returncode=None):
+        self.pid = pid
+        self.returncode = returncode
+        self.terminated = False
+
+    def poll(self):
+        return self.returncode
+
+    def terminate(self):
+        self.terminated = True
+
+
+def test_cleanup_unattached_browser_launch_stops_posix_process_group(monkeypatch):
+    process = FakeProcess()
+    killed = []
+    monkeypatch.setattr(admin.ipc, "IS_WINDOWS", False)
+    monkeypatch.setattr("browser_harness.daemon._devtools_port_live", lambda _profile: False)
+    monkeypatch.setattr(admin.os, "killpg", lambda pid, sig: killed.append((pid, sig)))
+
+    admin._cleanup_unattached_browser_launch((process, Path("/profile")))
+
+    assert killed == [(123, signal.SIGTERM)]
+
+
+def test_cleanup_unattached_browser_launch_keeps_cdp_browser(monkeypatch):
+    process = FakeProcess()
+    monkeypatch.setattr("browser_harness.daemon._devtools_port_live", lambda _profile: True)
+    monkeypatch.setattr(admin.os, "killpg", lambda _pid, _sig: pytest.fail("must keep the attached browser"))
+
+    admin._cleanup_unattached_browser_launch((process, Path("/profile")))
+
+
+def test_cleanup_unattached_browser_launch_ignores_unowned_launch(monkeypatch):
+    monkeypatch.setattr(
+        "browser_harness.daemon._devtools_port_live",
+        lambda _profile: pytest.fail("must not probe an unowned launch"),
+    )
+
+    admin._cleanup_unattached_browser_launch((None, Path("/profile")))
+
+
+@pytest.mark.parametrize("env_key", ["BH_CHROME_PATH", "CHROME_PATH"])
+def test_explicit_chrome_path_retains_matching_profile_on_linux(monkeypatch, tmp_path, env_key):
+    binary = tmp_path / "google-chrome-stable"
+    binary.touch()
+    profile = tmp_path / ".config" / "google-chrome"
+    (profile / "Default").mkdir(parents=True)
+    (profile / "Local State").write_text('{}')
+    process = FakeProcess()
+
+    other_key = "CHROME_PATH" if env_key == "BH_CHROME_PATH" else "BH_CHROME_PATH"
+    monkeypatch.setenv(env_key, str(binary))
+    monkeypatch.delenv(other_key, raising=False)
+    monkeypatch.setattr("browser_harness.daemon.PROFILES", [profile])
+    monkeypatch.setattr("browser_harness.daemon.remote_debugging_toggle_profiles", lambda: [profile])
+    monkeypatch.setattr("browser_harness.daemon._devtools_port_live", lambda _profile: False)
+    monkeypatch.setattr("platform.system", lambda: "Linux")
+    monkeypatch.setattr("subprocess.Popen", lambda *_args, **_kwargs: process)
+    killed = []
+    monkeypatch.setattr(admin.ipc, "IS_WINDOWS", False)
+    monkeypatch.setattr(admin.os, "killpg", lambda pid, sig: killed.append((pid, sig)))
+
+    launch = admin._launch_browser()
+    assert launch == (process, profile)
+
+    admin._cleanup_unattached_browser_launch(launch)
+    assert killed == [(process.pid, signal.SIGTERM)]
+
+
+@pytest.mark.parametrize("system", ["Darwin", "Windows"])
+def test_explicit_chrome_path_remains_unowned_without_platform_cleanup(monkeypatch, tmp_path, system):
+    binary = tmp_path / ("chrome.exe" if system == "Windows" else "Google Chrome")
+    binary.touch()
+    profile = tmp_path / ".config" / "google-chrome"
+    (profile / "Default").mkdir(parents=True)
+    (profile / "Local State").write_text('{}')
+    process = FakeProcess()
+
+    monkeypatch.setenv("BH_CHROME_PATH", str(binary))
+    monkeypatch.delenv("CHROME_PATH", raising=False)
+    monkeypatch.setattr("browser_harness.daemon.PROFILES", [profile])
+    monkeypatch.setattr("browser_harness.daemon.remote_debugging_toggle_profiles", lambda: [profile])
+    monkeypatch.setattr("platform.system", lambda: system)
+    monkeypatch.setattr("subprocess.Popen", lambda *_args, **_kwargs: process)
+    monkeypatch.setattr(admin.os, "killpg", lambda *_args: pytest.fail("must not terminate an unowned browser"))
+
+    launch = admin._launch_browser()
+    assert launch == (process, None)
+
+    admin._cleanup_unattached_browser_launch(launch)
+    assert process.terminated is False
+
+
+def test_explicit_unknown_browser_path_remains_unowned(monkeypatch, tmp_path):
+    binary = tmp_path / "custom-browser"
+    binary.touch()
+    profile = tmp_path / ".config" / "google-chrome"
+    profile.mkdir(parents=True)
+    (profile / "Local State").write_text('{}')
+    process = FakeProcess()
+
+    monkeypatch.setenv("BH_CHROME_PATH", str(binary))
+    monkeypatch.delenv("CHROME_PATH", raising=False)
+    monkeypatch.setattr("browser_harness.daemon.PROFILES", [profile])
+    monkeypatch.setattr("browser_harness.daemon.remote_debugging_toggle_profiles", lambda: [profile])
+    monkeypatch.setattr("subprocess.Popen", lambda *_args, **_kwargs: process)
+
+    assert admin._launch_browser() == (process, None)
 
 
 @pytest.mark.parametrize("value", ["0", "false", "NO", " off "])
