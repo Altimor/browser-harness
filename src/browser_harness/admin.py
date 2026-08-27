@@ -940,6 +940,19 @@ def _browser_launch_spec(base):
     return _DEFAULT_LAUNCH
 
 
+def _browser_binary_matches_profile(binary, base):
+    """True when an explicit browser binary belongs to ``base``."""
+    name = Path(binary).name.lower().removesuffix(".exe")
+    mac_app, posix_cmds, win_target = _browser_launch_spec(base)
+    candidates = (mac_app, *posix_cmds, win_target)
+
+    def normalize(value):
+        return "".join(char for char in (value or "").lower() if char.isalnum())
+
+    normalized_name = normalize(name)
+    return any(normalized_name == normalize(candidate) for candidate in candidates)
+
+
 def _profile_directory_args(base):
     """Relaunch skips Chrome's profile picker"""
     if not base:
@@ -965,21 +978,29 @@ def _launch_browser():
     import platform, shutil, subprocess
     from .daemon import PROFILES, remote_debugging_toggle_profiles
 
+    enabled = remote_debugging_toggle_profiles()
+    known_profiles = enabled + [
+        base for base in PROFILES if base not in enabled and (base / "Local State").exists()
+    ]
     for key in ("BH_CHROME_PATH", "CHROME_PATH"):
         raw = (os.environ.get(key) or "").strip()
         if raw and Path(raw).expanduser().is_file():
             try:
+                binary = Path(raw).expanduser()
                 process = subprocess.Popen(
-                    [str(Path(raw).expanduser())],
+                    [str(binary)],
                     stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, **ipc.spawn_kwargs(),
                 )
-                return process, None
+                profile = next(
+                    (base for base in known_profiles if _browser_binary_matches_profile(binary, base)),
+                    None,
+                )
+                return process, profile
             except (OSError, subprocess.SubprocessError):
                 # A path that exists but can't execute (permissions, wrong arch)
                 # must fall through to normal discovery, not abort
                 continue
 
-    enabled = remote_debugging_toggle_profiles()
     base = enabled[0] if enabled else next((b for b in PROFILES if (b / "Local State").exists()), None)
     mac_app, posix_cmds, win_target = _browser_launch_spec(base) if base else _DEFAULT_LAUNCH
     profile_args = _profile_directory_args(base)

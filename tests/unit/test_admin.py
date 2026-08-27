@@ -65,6 +65,42 @@ def test_cleanup_unattached_browser_launch_ignores_unowned_launch(monkeypatch):
     admin._cleanup_unattached_browser_launch((None, Path("/profile")))
 
 
+@pytest.mark.parametrize("env_key", ["BH_CHROME_PATH", "CHROME_PATH"])
+def test_explicit_chrome_path_retains_matching_profile(monkeypatch, tmp_path, env_key):
+    binary = tmp_path / "google-chrome-stable"
+    binary.touch()
+    profile = tmp_path / ".config" / "google-chrome"
+    (profile / "Default").mkdir(parents=True)
+    (profile / "Local State").write_text('{}')
+    process = FakeProcess()
+
+    other_key = "CHROME_PATH" if env_key == "BH_CHROME_PATH" else "BH_CHROME_PATH"
+    monkeypatch.setenv(env_key, str(binary))
+    monkeypatch.delenv(other_key, raising=False)
+    monkeypatch.setattr("browser_harness.daemon.PROFILES", [profile])
+    monkeypatch.setattr("browser_harness.daemon.remote_debugging_toggle_profiles", lambda: [profile])
+    monkeypatch.setattr("subprocess.Popen", lambda *_args, **_kwargs: process)
+
+    assert admin._launch_browser() == (process, profile)
+
+
+def test_explicit_unknown_browser_path_remains_unowned(monkeypatch, tmp_path):
+    binary = tmp_path / "custom-browser"
+    binary.touch()
+    profile = tmp_path / ".config" / "google-chrome"
+    profile.mkdir(parents=True)
+    (profile / "Local State").write_text('{}')
+    process = FakeProcess()
+
+    monkeypatch.setenv("BH_CHROME_PATH", str(binary))
+    monkeypatch.delenv("CHROME_PATH", raising=False)
+    monkeypatch.setattr("browser_harness.daemon.PROFILES", [profile])
+    monkeypatch.setattr("browser_harness.daemon.remote_debugging_toggle_profiles", lambda: [profile])
+    monkeypatch.setattr("subprocess.Popen", lambda *_args, **_kwargs: process)
+
+    assert admin._launch_browser() == (process, None)
+
+
 @pytest.mark.parametrize("value", ["0", "false", "NO", " off "])
 def test_update_banner_can_be_disabled_without_network_or_cache_access(monkeypatch, value):
     monkeypatch.setenv("BH_UPDATE_CHECK", value)
