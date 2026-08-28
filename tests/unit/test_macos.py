@@ -15,7 +15,7 @@ def _enable_chrome_toggle(monkeypatch):
 
 
 def _no_ready_daemon(monkeypatch):
-    monkeypatch.setattr(macos, "daemon_browser_ready", lambda: False)
+    monkeypatch.setattr(macos, "daemon_browser_ready", lambda _name=None: False)
 
 
 def test_mac_approve_requires_the_persistent_chrome_checkbox(monkeypatch):
@@ -69,7 +69,7 @@ def test_mac_approve_returns_not_found_without_a_prompt(monkeypatch):
 
 def test_mac_approve_returns_ready_without_running_osascript(monkeypatch):
     monkeypatch.setattr(macos.platform, "system", lambda: "Darwin")
-    monkeypatch.setattr(macos, "daemon_browser_ready", lambda: True)
+    monkeypatch.setattr(macos, "daemon_browser_ready", lambda _name=None: True)
     monkeypatch.setattr(
         macos.subprocess,
         "run",
@@ -83,7 +83,7 @@ def test_mac_approve_detects_user_accepting_while_it_checks(monkeypatch):
     monkeypatch.setattr(macos.platform, "system", lambda: "Darwin")
     _enable_chrome_toggle(monkeypatch)
     readiness = iter([False, True])
-    monkeypatch.setattr(macos, "daemon_browser_ready", lambda: next(readiness))
+    monkeypatch.setattr(macos, "daemon_browser_ready", lambda _name=None: next(readiness))
     monkeypatch.setattr(
         macos.subprocess,
         "run",
@@ -116,6 +116,8 @@ def test_mac_approve_maps_pending_accessibility_consent_to_guidance(monkeypatch)
 
     assert status == "accessibility-required"
     assert "Accessibility" in detail
+    assert "retry the browser command" in detail
+    assert "browser-harness mac-approve" in detail
 
 
 def test_mac_approve_is_unavailable_off_macos(monkeypatch):

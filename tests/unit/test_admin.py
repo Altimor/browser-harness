@@ -248,6 +248,54 @@ def test_stale_websocket_does_not_open_chrome_inspect():
     assert not admin._needs_chrome_remote_debugging_prompt(msg)
 
 
+def test_ensure_daemon_automatically_approves_macos_popup(monkeypatch, tmp_path, capsys):
+    alive_results = iter([False, False, True])
+    approval_calls = []
+    clock = iter([0.0, 3.0, 3.1, 3.2])
+
+    monkeypatch.setattr(admin, "daemon_alive", lambda _name=None: next(alive_results))
+    monkeypatch.setattr(admin, "_is_local_chrome_mode", lambda _env=None: True)
+    monkeypatch.setattr(admin, "_log_tail", lambda _name=None: "handshake-wait: Allow remote debugging")
+    monkeypatch.setattr(
+        admin,
+        "_try_macos_remote_debugging_approval",
+        lambda name=None: approval_calls.append(name) or ("ready", None),
+    )
+    monkeypatch.setattr(admin.subprocess, "Popen", lambda *_args, **_kwargs: FakeProcess())
+    monkeypatch.setattr(admin.ipc, "log_path", lambda _name: tmp_path / "daemon.log")
+    monkeypatch.setattr(admin.ipc, "spawn_kwargs", lambda: {})
+    monkeypatch.setattr(admin.time, "time", lambda: next(clock))
+    monkeypatch.setattr(admin.time, "sleep", lambda _seconds: None)
+    monkeypatch.setattr(admin, "_cleanup_unattached_browser_launch", lambda _launch: None)
+
+    admin.ensure_daemon()
+
+    assert approval_calls == [None]
+    assert "approved Chrome's" in capsys.readouterr().err
+
+
+def test_ensure_daemon_reports_macos_accessibility_recovery(monkeypatch, tmp_path):
+    clock = iter([0.0, 3.0, 3.1, 61.0])
+
+    monkeypatch.setattr(admin, "daemon_alive", lambda _name=None: False)
+    monkeypatch.setattr(admin, "_is_local_chrome_mode", lambda _env=None: True)
+    monkeypatch.setattr(admin, "_log_tail", lambda _name=None: "handshake-wait: Allow remote debugging")
+    monkeypatch.setattr(
+        admin,
+        "_try_macos_remote_debugging_approval",
+        lambda _name=None: ("accessibility-required", "grant Accessibility, then retry"),
+    )
+    monkeypatch.setattr(admin.subprocess, "Popen", lambda *_args, **_kwargs: FakeProcess())
+    monkeypatch.setattr(admin.ipc, "log_path", lambda _name: tmp_path / "daemon.log")
+    monkeypatch.setattr(admin.ipc, "spawn_kwargs", lambda: {})
+    monkeypatch.setattr(admin.time, "time", lambda: next(clock))
+    monkeypatch.setattr(admin.time, "sleep", lambda _seconds: None)
+    monkeypatch.setattr(admin, "restart_daemon", lambda _name=None: None)
+
+    with pytest.raises(RuntimeError, match="automatic macOS approval failed.*Accessibility.*retry"):
+        admin.ensure_daemon()
+
+
 def test_daemon_endpoint_names_discovers_valid_socket_names(tmp_path, monkeypatch):
     monkeypatch.setattr(admin.ipc, "IS_WINDOWS", False)
     monkeypatch.setattr(admin.ipc, "BH_RUNTIME_DIR", None)  # shared-tmpdir mode

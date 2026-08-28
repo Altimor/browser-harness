@@ -53,7 +53,9 @@ return resultText
 
 _ACCESSIBILITY_DETAIL = (
     "allow the app launching browser-harness (for example Terminal, iTerm, or Codex) "
-    "in System Settings > Privacy & Security > Accessibility"
+    "in System Settings > Privacy & Security > Accessibility, then retry the browser "
+    "command; if running `mac-approve` directly, keep Chrome's prompt visible and rerun "
+    "`browser-harness mac-approve`"
 )
 
 
@@ -66,12 +68,12 @@ def _google_chrome_toggle_enabled() -> bool:
     return _google_chrome_root() in remote_debugging_toggle_profiles()
 
 
-def approve_remote_debugging() -> tuple[str, str | None]:
+def approve_remote_debugging(name=None) -> tuple[str, str | None]:
     """Click Chrome's exact per-connection Allow sheet without activating Chrome."""
     if platform.system() != "Darwin":
         return "unsupported", "mac-approve is only available on macOS"
 
-    if daemon_browser_ready():
+    if daemon_browser_ready(name):
         return "ready", None
 
     if not _google_chrome_toggle_enabled():
@@ -109,7 +111,7 @@ def approve_remote_debugging() -> tuple[str, str | None]:
         return "ready", None
     if status == "not-found":
         # The user may have accepted the sheet while AppleScript was looking.
-        if daemon_browser_ready():
+        if daemon_browser_ready(name):
             return "ready", None
         return (
             "not-found",

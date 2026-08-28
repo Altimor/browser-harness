@@ -180,6 +180,22 @@ def _is_local_chrome_mode(env=None):
     )
 
 
+def _try_macos_remote_debugging_approval(name=None):
+    """Best-effort click of Chrome's per-connection Allow sheet on macOS."""
+    if sys.platform != "darwin":
+        return None
+    try:
+        # Imported lazily because macos imports daemon_browser_ready from this
+        # module. At runtime admin is fully initialized, so the cycle is safe.
+        from .macos import approve_remote_debugging
+
+        return approve_remote_debugging(name)
+    except Exception as exc:
+        # Automatic approval is a convenience. Preserve the manual Allow path
+        # when macOS UI inspection itself fails unexpectedly.
+        return "error", str(exc)
+
+
 def daemon_alive(name=None):
     # Ping handshake (not a bare connect) so a stale .port file + port reuse
     # after a daemon crash doesn't make us mistake an unrelated listener for ours.
@@ -369,6 +385,7 @@ def ensure_daemon(wait=60.0, name=None, env=None):
     local = _is_local_chrome_mode(env)
     launched_browser = None
     opened_inspect = False
+    mac_approval_failure = None
     for _ in range(3):
         e = {**os.environ, **({"BU_NAME": name} if name else {}), **(env or {})}
         try:
@@ -390,20 +407,38 @@ def ensure_daemon(wait=60.0, name=None, env=None):
                 return
             if p.poll() is not None: break
             if not hinted and time.time() - spawned > 2 and (_log_tail(name) or "").startswith("handshake-wait"):
-                action = (
-                    "run `browser-harness mac-approve` in another shell or click Allow"
-                    if sys.platform == "darwin"
-                    else "click Allow"
-                )
-                print(
-                    f'browser-harness: Chrome is asking "Allow remote debugging?" — {action} to continue.',
-                    file=sys.stderr,
-                )
+                approval = _try_macos_remote_debugging_approval(name)
+                if approval:
+                    status, detail = approval
+                    if status == "ready":
+                        print(
+                            'browser-harness: approved Chrome\'s "Allow remote debugging?" prompt automatically.',
+                            file=sys.stderr,
+                        )
+                    else:
+                        mac_approval_failure = f"{status}: {detail or 'automatic approval failed'}"
+                        print(
+                            'browser-harness: Chrome is asking "Allow remote debugging?" — '
+                            f"automatic macOS approval could not continue ({mac_approval_failure}). "
+                            "Click Allow manually now, or follow that instruction and retry.",
+                            file=sys.stderr,
+                        )
+                else:
+                    print(
+                        'browser-harness: Chrome is asking "Allow remote debugging?" — click Allow to continue.',
+                        file=sys.stderr,
+                    )
                 hinted = True
             time.sleep(0.2)
         msg = _log_tail(name) or ""
         if local and msg.startswith("handshake-wait"):
             restart_daemon(name)
+            if mac_approval_failure:
+                raise RuntimeError(
+                    "permission-blocked: automatic macOS approval failed "
+                    f"({mac_approval_failure}). Grant the requested permission and retry the browser command; "
+                    "browser-harness will automatically try the Chrome Allow prompt again."
+                )
             raise RuntimeError(
                 "permission-blocked: Chrome's Allow popup was not clicked in time -- wait for the user to click Allow, then retry."
             )
