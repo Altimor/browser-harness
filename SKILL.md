@@ -25,7 +25,13 @@ PY
 
 - Invoke as `browser-harness`. Use heredocs for multi-line commands.
 - Helpers are pre-imported. `run.py` calls `ensure_daemon()` before `exec`.
-- First navigation is `new_tab(url)`, not `goto_url(url)`.
+- First navigation for a task is `new_tab(url)`, not `goto_url(url)`. The daemon
+  preserves the attached tab across separate CLI invocations, so do not call
+  `new_tab()` again in every script.
+- Keep one working tab per task/site. Before opening another, inspect
+  `current_tab()` and `list_tabs()` and use `switch_tab()` to reuse a matching
+  tab. Do not leave duplicate tabs on the same URL or close tabs you did not
+  create.
 - `new_tab()` and `switch_tab()` attach and move the horse marker without
   changing Chrome's visible tab. Screenshots and normal CDP input work in the
   background; call `activate_tab(target)` only when the user explicitly asks
