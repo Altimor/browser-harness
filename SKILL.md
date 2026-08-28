@@ -60,7 +60,7 @@ chrome://inspect/#remote-debugging
 ```
 
 On macOS, Chrome may show a per-connection "Allow remote debugging?" sheet.
-That sheet is outside CDP. Follow
+That sheet is outside CDP. Load the `macos-remote-debugging` skill, or follow
 [macos-remote-debugging.md](https://github.com/browser-use/browser-harness/blob/main/interaction-skills/macos-remote-debugging.md)
 to approve it with native macOS UI automation, then continue the waiting
 browser command.
@@ -187,8 +187,8 @@ If you get stuck on a browser mechanic, check https://github.com/browser-use/bro
 ## Gotchas
 
 - `chrome://inspect/#remote-debugging` must be enabled for local Chrome control.
-- On macOS, if Chrome shows "Allow remote debugging?", follow
-  `interaction-skills/macos-remote-debugging.md`. Do not poll the daemon.
+- On macOS, if Chrome shows "Allow remote debugging?", load the
+  `macos-remote-debugging` skill. Do not poll the daemon.
 - Omnibox popups are not real work tabs.
 - CDP target order is not Chrome's visible tab-strip order.
 - `BU_CDP_URL` is an HTTP DevTools endpoint; the daemon resolves it to WebSocket.

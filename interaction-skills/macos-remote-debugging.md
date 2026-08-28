@@ -48,7 +48,17 @@ generic coordinate click or activate Chrome unnecessarily. When the script
 returns `ready`, the waiting browser command should continue; if it already
 timed out, retry it once.
 
-If macOS says the caller is not authorized to use assistive access, grant the
-app launching the agent Accessibility permission in System Settings > Privacy
-& Security > Accessibility. Do not loop: permission cannot be bypassed with a
-different AppleScript wrapper.
+If macOS denies assistive access, do not inspect TCC or try another UI wrapper.
+When the task needs the user's existing logins/profile, stop and ask them to
+grant the launching app Accessibility permission in System Settings > Privacy
+& Security > Accessibility.
+
+Otherwise, continue unattended with a temporary dedicated Chrome: create its
+profile with `mktemp -d`, launch the real Chrome binary with that exact
+`--user-data-dir`, `--remote-debugging-port=0`, and
+`--remote-debugging-address=127.0.0.1`, then read its chosen port from
+`DevToolsActivePort` and pass `BU_CDP_URL=http://127.0.0.1:<port>` on every
+browser-harness call. Tell the user it is a separate profile with none of their
+logins, cookies, or tabs. Retain the launched PID and exact temp path; when the
+task ends, reload its named daemon, terminate only that PID, wait for exit, and
+remove only that temp profile.
