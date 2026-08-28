@@ -34,6 +34,37 @@ def inspect_marker() -> Path:
     return config_dir() / "inspect-opened"
 
 
+def isolated_browsers_dir() -> Path:
+    """Root for harness-owned isolated automation browsers (never a user profile)."""
+    return ensure_private_dir(config_dir() / "isolated-browsers")
+
+
+def isolated_browser_dir(name: str) -> Path:
+    """user-data-dir of the isolated automation browser owned by daemon `name`.
+
+    Fails closed instead of handing Chrome a --user-data-dir that a symlink
+    could redirect into the user's real profile: neither the root nor the
+    per-daemon directory may be a symlink, and the directory must still resolve
+    inside the root.
+    """
+    if not name or name in {".", ".."} or "/" in name or "\\" in name:
+        raise RuntimeError(f"unsafe isolated browser name {name!r}")
+    root = isolated_browsers_dir()
+    path = root / name
+    for candidate in (root, path):
+        if candidate.is_symlink():
+            raise RuntimeError(f"refusing to use isolated browser profile behind a symlink: {candidate}")
+    ensure_private_dir(path)
+    if path.resolve() != root.resolve() / name:
+        raise RuntimeError(f"isolated browser profile {path} resolves outside {root}")
+    return path
+
+
+def isolated_browser_record(name: str) -> Path:
+    """Ownership record (pid/port/user-data-dir) of that isolated browser."""
+    return isolated_browsers_dir() / f"{name}.json"
+
+
 def runtime_dir() -> Path:
     raw = os.environ.get("BH_RUNTIME_DIR")
     return ensure_private_dir(Path(raw).expanduser().resolve() if raw else home_dir() / "runtime")

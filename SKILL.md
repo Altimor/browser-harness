@@ -71,6 +71,17 @@ browser-harness mac-approve
 Continue browser work when it returns `ready`; otherwise follow its printed
 instruction.
 
+If nobody clicks Allow and Accessibility is unavailable, the harness keeps
+working by launching a separate automation browser it owns, on an isolated
+profile. That profile does not inherit the user's Chrome logins, cookies, or
+tabs, and their Chrome is untouched; it does persist between runs, so it may
+still hold state created inside it earlier (starts signed out, stays however
+you left it). Tell the user when this happens, and never present its pages as
+their logged-in session. To go back to their own Chrome: they click Allow (or
+grant Accessibility), then run `browser-harness --reload`, which also closes
+the isolated browser. Set `BH_ISOLATED_FALLBACK=0` to disable the fallback and
+fail instead.
+
 ## Remote Browsers
 
 Use Browser Use cloud for headless servers, parallel sub-agents, or isolated work.

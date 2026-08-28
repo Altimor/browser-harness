@@ -63,6 +63,15 @@ Continue browser work when the helper returns `ready`; otherwise follow its
 printed instruction. The first checkbox is intentionally a one-time manual
 Chrome setup step; it is not exposed to the harness until CDP is available.
 
+When the prompt is never approved, the harness falls back to a separate
+automation browser it owns, on an isolated profile that does not inherit the
+user's Chrome logins, cookies, or tabs — their Chrome and profile are never
+read, copied, or closed. The isolated profile directory persists, so state
+created inside it survives to the next fallback. `browser-harness --doctor`
+reports that browser while it is in use, and `browser-harness --reload` closes it
+so the next run goes back to the user's Chrome. `BH_ISOLATED_FALLBACK=0` turns
+the fallback off.
+
 The helper requires Accessibility permission for the app launching the CLI
 (for example Terminal, iTerm, Codex, or an IDE) in System Settings. If it is
 missing, grant it and retry the browser command; the harness will attempt the

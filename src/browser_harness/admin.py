@@ -433,6 +433,10 @@ def ensure_daemon(wait=60.0, name=None, env=None):
         msg = _log_tail(name) or ""
         if local and msg.startswith("handshake-wait"):
             restart_daemon(name)
+            reason = 'Chrome\'s "Allow remote debugging?" prompt was not approved'
+            reason += f" ({mac_approval_failure})." if mac_approval_failure else " in time."
+            if _recover_with_isolated_browser(name, wait, env, reason):
+                return
             if mac_approval_failure:
                 raise RuntimeError(
                     "permission-blocked: automatic macOS approval failed "
@@ -443,8 +447,12 @@ def ensure_daemon(wait=60.0, name=None, env=None):
                 "permission-blocked: Chrome's Allow popup was not clicked in time -- wait for the user to click Allow, then retry."
             )
         if local and _needs_chrome_permission_popup(msg):
-            print('browser-harness: Chrome is asking "Allow remote debugging?". Click Allow in Chrome, then retry browser work.', file=sys.stderr)
             restart_daemon(name)
+            if _recover_with_isolated_browser(
+                name, wait, env, 'Chrome is still waiting on its "Allow remote debugging?" prompt.'
+            ):
+                return
+            print('browser-harness: Chrome is asking "Allow remote debugging?". Click Allow in Chrome, then retry browser work.', file=sys.stderr)
             raise RuntimeError(
                 "permission-blocked: wait for the user to click Allow in the Chrome permission popup before retrying."
             )
@@ -467,8 +475,12 @@ def ensure_daemon(wait=60.0, name=None, env=None):
             from .daemon import remote_debugging_toggle_profiles, remote_debugging_user_enabled
             if remote_debugging_user_enabled():
                 # chrome://inspect toggle is already on — connection died
-                print('browser-harness: Chrome is asking "Allow remote debugging?". Click Allow in Chrome, then retry browser work.', file=sys.stderr)
                 restart_daemon(name)
+                if _recover_with_isolated_browser(
+                    name, wait, env, 'Chrome is still waiting on its "Allow remote debugging?" prompt.'
+                ):
+                    return
+                print('browser-harness: Chrome is asking "Allow remote debugging?". Click Allow in Chrome, then retry browser work.', file=sys.stderr)
                 raise RuntimeError(
                     "permission-blocked: wait for the user to click Allow in the Chrome permission popup before retrying."
                 )
@@ -622,6 +634,10 @@ def restart_daemon(name=None, require_clean=False):
         os.unlink(pid_path)
     except FileNotFoundError:
         pass
+    # An isolated automation browser exists only to serve this daemon, so it dies
+    # with it. That also means the next run tries the user's own Chrome again — a
+    # human who clicks Allow gets their real browser back.
+    _stop_isolated_browser(name)
 
 
 def _browser_use(path, method, body=None):
@@ -1067,6 +1083,19 @@ def _launch_browser():
         return None
 
 
+def _terminate_process_group(process):
+    """Best-effort stop of a browser we launched, including its children."""
+    import signal
+
+    try:
+        if ipc.IS_WINDOWS:
+            process.terminate()
+        else:
+            os.killpg(process.pid, signal.SIGTERM)
+    except (OSError, subprocess.SubprocessError):
+        pass
+
+
 def _cleanup_unattached_browser_launch(launch):
     """Stop a browser we launched when the daemon attached somewhere else."""
     if not launch:
@@ -1080,15 +1109,293 @@ def _cleanup_unattached_browser_launch(launch):
     if _devtools_port_live(profile):
         return
 
+    _terminate_process_group(process)
+
+
+# --- isolated automation browser --------------------------------------------
+# Chrome 144+ asks for per-connection "Allow remote debugging?" approval. Clicking
+# it for the user needs macOS Accessibility permission for whatever app launched
+# the CLI, and macOS TCC attributes that permission to the *host* app (Terminal,
+# Codex, ChatGPT.app...), so an agent frequently cannot get it. macOS TCC cannot
+# be bypassed, so the only honest unattended recovery is a second browser the
+# harness owns outright: its own --user-data-dir and --remote-debugging-port, no
+# prompt at all. That is a *separate profile*: it does not inherit the user's
+# Chrome logins, cookies, or tabs, and their Chrome is never read, copied, or
+# closed. The profile directory persists between runs, so state created inside
+# it (a login performed there, its cookies) can survive into the next fallback.
+
+ISOLATED_BROWSER_BOOT_TIMEOUT = 25
+ISOLATED_BROWSER_STOP_TIMEOUT = 8
+_ISOLATED_APPS = ("Google Chrome", "Chromium", "Microsoft Edge", "Brave Browser")
+
+
+def _isolated_fallback_enabled():
+    """Automatic isolated-browser recovery: on for local macOS, opt-in elsewhere.
+
+    BH_ISOLATED_FALLBACK=0 restores the old behaviour (raise and wait for a
+    human). Windows is excluded because ownership of the launched browser is
+    verified through `ps`.
+    """
+    raw = (os.environ.get("BH_ISOLATED_FALLBACK") or "").strip().lower()
+    if raw in {"0", "false", "no", "off"}:
+        return False
+    if raw:
+        return not ipc.IS_WINDOWS
+    return sys.platform == "darwin"
+
+
+def _isolated_browser_binaries():
+    """Candidate executables for the isolated browser, closest match first.
+
+    Real binaries only: the browser must accept --user-data-dir and stay our
+    child process, neither of which `open -a` can do.
+    """
+    import platform, shutil
+    from .daemon import PROFILES, remote_debugging_toggle_profiles
+
+    out = []
+    for key in ("BH_CHROME_PATH", "CHROME_PATH"):
+        raw = (os.environ.get(key) or "").strip()
+        if raw:
+            out.append(Path(raw).expanduser())
+    enabled = remote_debugging_toggle_profiles()
+    base = enabled[0] if enabled else next((b for b in PROFILES if (b / "Local State").exists()), None)
+    mac_app, posix_cmds, _win_target = _browser_launch_spec(base) if base else _DEFAULT_LAUNCH
+    if platform.system() == "Darwin":
+        for app in (mac_app, *(a for a in _ISOLATED_APPS if a != mac_app)):
+            for root in (Path("/Applications"), Path.home() / "Applications"):
+                out.append(root / f"{app}.app/Contents/MacOS/{app}")
+    else:
+        for cmd in (*posix_cmds, *_DEFAULT_LAUNCH[1]):
+            found = shutil.which(cmd)
+            if found:
+                out.append(Path(found))
+    seen, unique = set(), []
+    for path in out:
+        if str(path) not in seen:
+            seen.add(str(path))
+            unique.append(path)
+    return unique
+
+
+def _isolated_start_fingerprint(pid):
+    """Stringified process-start-time at `pid`, or None when it has no process."""
+    value = _process_start_time(pid)
+    return None if value is None else str(value)
+
+
+def _read_isolated_record(name):
+    """Ownership record of the isolated browser started for `name`, or None."""
+    try:
+        record = json.loads(paths.isolated_browser_record(name).read_text(encoding="utf-8"))
+    except (OSError, ValueError):
+        return None
+    if not isinstance(record, dict):
+        return None
+    pid = record.get("pid")
+    port = record.get("port")
+    user_data_dir = record.get("user_data_dir")
+    start_time = record.get("start_time")
+    # `type(...) is int` rejects bool, which would make os.killpg(True, ...) signal
+    # process group 1. A record we can't fully trust owns nothing — including a
+    # record written before start_time existed, which is dropped, never signalled.
+    if type(pid) is not int or pid <= 0 or type(port) is not int:
+        return None
+    if not isinstance(user_data_dir, str) or not user_data_dir:
+        return None
+    if not isinstance(start_time, str) or not start_time:
+        return None
+    return {
+        "pid": pid, "port": port, "user_data_dir": user_data_dir,
+        "start_time": start_time, "cdp_url": f"http://127.0.0.1:{port}",
+    }
+
+
+def _isolated_browser_owned(record):
+    """True when the recorded PID is still the exact process we launched.
+
+    Two independent gates, both required before any signal: the process-start-time
+    fingerprint recorded at launch (a reused PID gets a different one), and a
+    command line still carrying our --user-data-dir as a whole argument (so a
+    profile path that merely prefixes another one cannot match).
+    """
+    if _isolated_start_fingerprint(record["pid"]) != record.get("start_time"):
+        return False
+    try:
+        out = subprocess.check_output(
+            ["ps", "-ww", "-o", "command=", "-p", str(record["pid"])],
+            stderr=subprocess.DEVNULL, timeout=2, text=True, errors="replace",
+        )
+    except (subprocess.SubprocessError, OSError):
+        return False
+    arg = re.escape(f"--user-data-dir={record['user_data_dir']}")
+    return re.search(rf"(?:\A|\s){arg}(?:\s|\Z)", out) is not None
+
+
+def _write_isolated_record(name, record):
+    path = paths.isolated_browser_record(name)
+    tmp = path.with_name(path.name + ".tmp")
+    tmp.write_text(
+        json.dumps({k: record[k] for k in ("pid", "port", "user_data_dir", "start_time")}),
+        encoding="utf-8",
+    )
+    try:
+        os.chmod(tmp, 0o600)
+    except OSError:
+        pass
+    os.replace(tmp, path)
+
+
+def _forget_isolated_record(name):
+    try:
+        paths.isolated_browser_record(name).unlink()
+    except OSError:
+        pass
+
+
+def _stop_isolated_browser(name=None):
+    """Stop the isolated browser this daemon owns. True when none is left running.
+
+    Never touches the user's own browser: the recorded PID must pass both
+    ownership gates. A record that cannot be verified is forgotten without a
+    signal. Returns False when a verified process was signalled and is still
+    holding the profile after ISOLATED_BROWSER_STOP_TIMEOUT, so a caller does not
+    race Chrome's profile lock with a replacement launch.
+    """
     import signal
 
+    name = name or NAME
+    record = _read_isolated_record(name)
+    if record is None or not _isolated_browser_owned(record):
+        _forget_isolated_record(name)
+        return True
     try:
-        if ipc.IS_WINDOWS:
-            process.terminate()
-        else:
-            os.killpg(process.pid, signal.SIGTERM)
-    except (OSError, subprocess.SubprocessError):
+        os.killpg(record["pid"], signal.SIGTERM)
+    except (OSError, SystemError, OverflowError):
+        try:
+            os.kill(record["pid"], signal.SIGTERM)
+        except (OSError, SystemError, OverflowError):
+            pass
+    deadline = time.time() + ISOLATED_BROWSER_STOP_TIMEOUT
+    while True:
+        if not _isolated_browser_owned(record):
+            _forget_isolated_record(name)
+            return True
+        if time.time() >= deadline:
+            # No SIGKILL escalation: a browser still shutting down is flushing its
+            # own profile. Keep the record so a later stop can still identify this
+            # exact process instead of losing track of it.
+            return False
+        time.sleep(0.2)
+
+
+def _start_isolated_browser(name):
+    """Launch this daemon's own browser on an isolated profile. Record or None.
+
+    Any browser still recorded for this daemon is stopped first, so one daemon
+    never owns two — and a predecessor that refused to stop blocks the relaunch
+    rather than letting two processes fight over one profile lock.
+    """
+    if not _stop_isolated_browser(name):
+        print(
+            "browser-harness: the previous isolated browser is still shutting down; "
+            "not relaunching it on the same profile.",
+            file=sys.stderr,
+        )
+        return None
+    try:
+        user_data_dir = paths.isolated_browser_dir(name)
+    except (RuntimeError, OSError) as exc:
+        print(f"browser-harness: isolated browser profile unusable: {exc}", file=sys.stderr)
+        return None
+    active_port = user_data_dir / "DevToolsActivePort"
+    try:
+        active_port.unlink()
+    except OSError:
         pass
+    for binary in _isolated_browser_binaries():
+        try:
+            if not (binary.is_file() and os.access(binary, os.X_OK)):
+                continue
+            process = subprocess.Popen(
+                [
+                    str(binary),
+                    f"--user-data-dir={user_data_dir}",
+                    # Port 0 lets the browser pick a free port and write it to
+                    # DevToolsActivePort — no bind-then-hand-over port race.
+                    "--remote-debugging-port=0",
+                    # Loopback is already Chrome's default for the DevTools port;
+                    # state it so no build default or policy can widen it. Chromium
+                    # ignores flags it does not know, so this is safe on old builds.
+                    "--remote-debugging-address=127.0.0.1",
+                    "--no-first-run",
+                    "--no-default-browser-check",
+                    "about:blank",
+                ],
+                stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, **ipc.spawn_kwargs(),
+            )
+        except (OSError, subprocess.SubprocessError):
+            continue
+        deadline = time.time() + ISOLATED_BROWSER_BOOT_TIMEOUT
+        while time.time() < deadline:
+            try:
+                port = int(active_port.read_text(encoding="utf-8", errors="replace").splitlines()[0])
+            except (OSError, ValueError, IndexError):
+                port = 0
+            if port > 0:
+                # Without a fingerprint we could never re-verify this PID later, so
+                # we would have to signal on PID alone. Refuse to own it instead.
+                start_time = _isolated_start_fingerprint(process.pid)
+                if start_time is None:
+                    break
+                record = {
+                    "pid": process.pid,
+                    "port": port,
+                    "user_data_dir": str(user_data_dir),
+                    "start_time": start_time,
+                    "cdp_url": f"http://127.0.0.1:{port}",
+                }
+                _write_isolated_record(name, record)
+                return record
+            if process.poll() is not None:
+                break
+            time.sleep(0.2)
+        _terminate_process_group(process)
+    return None
+
+
+def _recover_with_isolated_browser(name, wait, env, reason):
+    """Attach the daemon to a browser we own when Chrome's Allow can't be clicked.
+
+    Returns True once that daemon is up. Never provisions or bills a cloud
+    browser: the fallback is always a local process this machine owns.
+    """
+    if not _isolated_fallback_enabled():
+        return False
+    name = name or NAME
+    try:
+        ipc._check(name)
+    except ValueError:
+        return False
+    record = _start_isolated_browser(name)
+    if not record:
+        return False
+    print(
+        f"browser-harness: {reason} Falling back to a separate automation browser the harness "
+        f"owns, on an isolated profile ({record['user_data_dir']}). That profile does NOT inherit "
+        "the user's Chrome logins, cookies, or tabs, and their Chrome is left untouched; it does "
+        "persist, so it may still hold state created inside it by earlier fallback runs. Say so "
+        "before reporting anything that looks like the user's own session. To go back to their "
+        "Chrome, have them click Allow (or grant Accessibility), then run `browser-harness "
+        "--reload`. BH_ISOLATED_FALLBACK=0 disables this fallback.",
+        file=sys.stderr,
+    )
+    try:
+        ensure_daemon(wait=wait, name=name, env={**(env or {}), "BU_CDP_URL": record["cdp_url"]})
+    except BaseException:
+        _stop_isolated_browser(name)
+        raise
+    return True
 
 
 def _open_chrome_inspect():
@@ -1182,6 +1489,12 @@ def run_doctor():
             print(f"        {conn['name']} — active page: {title} — {url}")
         else:
             print(f"        {conn['name']} — active page: (no real page)")
+    isolated = _read_isolated_record(NAME)
+    if isolated and _isolated_browser_owned(isolated):
+        print(
+            f"  isolated browser  {isolated['user_data_dir']} (pid {isolated['pid']}) — separate profile: "
+            "no logins/cookies/tabs from the user's Chrome (keeps state created inside it)"
+        )
     row("Browser Use cloud auth", cloud_auth, auth_state.get("source") or auth_state.get("reason") or "optional: browser-harness auth login")
     # Core health = chrome + daemon. Cloud auth is optional.
     return 0 if (chrome and daemon) else 1
