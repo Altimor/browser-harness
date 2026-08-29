@@ -24,18 +24,14 @@ complete long before the figure settles.
 **Always scroll the whole page before extracting**, then read the value under the `Total employee
 count` heading (see below), not the first number you can match.
 
-## Route: the Insights tab must be clicked, not navigated to
+## Route: navigate directly. Do not click the tab.
 
-`https://www.linkedin.com/company/<slug>/insights/` **silently redirects back to the company home.**
-There is no error and the URL rewrites, so a naive `goto` looks like it worked and then scrapes the
-overview page instead.
-
-Load the company home and click the tab:
+`https://www.linkedin.com/company/<slug>/insights/` loads fine. Verified across companies, with and
+without the trailing slash — no redirect.
 
 ```python
-new_tab("https://www.linkedin.com/company/langchain/")
+new_tab("https://www.linkedin.com/company/langchain/insights/")
 wait_for_load()
-click_text("Insights")          # direct /insights/ navigation redirects away
 wait(6)
 
 for _ in range(12):             # force the lazy sections to render
@@ -44,7 +40,12 @@ for _ in range(12):             # force the lazy sections to render
 wait(2.5)                       # let the figures settle after the last scroll
 ```
 
-Verify you actually landed: the URL should now end in `/insights/`. If it doesn't, the click missed.
+**Clicking the `Insights` nav link is the fragile path**, and it's the one that eventually breaks.
+The anchor is in the DOM and `visible` before its handler is wired, so the click lands, does
+nothing, and leaves you scraping the overview page — with the URL unchanged and no error. Three
+consecutive clicks on a present, visible anchor failed this way on `/company/mem0/`.
+
+Verify you landed: the URL should end in `/insights/`.
 
 ## Extraction anchors
 
